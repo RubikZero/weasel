@@ -129,11 +129,19 @@ void ClientImpl::UpdateInputPosition(RECT const& rc) {
   _SendMessage(WEASEL_IPC_UPDATE_INPUT_POS, compressed_rect, session_id);
 }
 
+void ClientImpl::SetSurroundingText(const std::wstring& text) {
+  if (!_Active())
+    return;
+  channel << L"session.surrounding_text=" << escape_string(text).c_str()
+          << L"\n";
+  channel << L".\n";
+  _SendMessage(WEASEL_IPC_SET_CONTEXT, 0, session_id);
+}
+
 void ClientImpl::FocusIn() {
   DWORD client_caps = 0; /* TODO */
   _SendMessage(WEASEL_IPC_FOCUS_IN, client_caps, session_id);
 }
-
 void ClientImpl::FocusOut() {
   _SendMessage(WEASEL_IPC_FOCUS_OUT, 0, session_id);
 }
@@ -246,6 +254,10 @@ bool Client::ChangePage(bool backward) {
 
 void Client::UpdateInputPosition(RECT const& rc) {
   m_pImpl->UpdateInputPosition(rc);
+}
+
+void Client::SetSurroundingText(const std::wstring& text) {
+  m_pImpl->SetSurroundingText(text);
 }
 
 void Client::FocusIn() {

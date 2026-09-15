@@ -144,6 +144,26 @@ LRESULT ServerImpl::OnServiceNotifyMessage(UINT uMsg,
   return 0;
 }
 
+LRESULT ServerImpl::OnPostCallbackMessage(UINT uMsg,
+                                          WPARAM wParam,
+                                          LPARAM lParam,
+                                          BOOL& bHandled) {
+  auto* fn = reinterpret_cast<std::function<void()>*>(lParam);
+  if (fn) {
+    (*fn)();
+    delete fn;
+  }
+  return 0;
+}
+
+void ServerImpl::Post(std::function<void()> fn) {
+  if (m_hWnd == NULL)
+    return;
+  PostMessage(WM_WEASEL_POST_CALLBACK, 0,
+              reinterpret_cast<LPARAM>(new std::function<void()>(
+                  std::move(fn))));
+}
+
 DWORD ServerImpl::OnCommand(WEASEL_IPC_COMMAND uMsg,
                             DWORD wParam,
                             DWORD lParam) {
@@ -305,6 +325,16 @@ DWORD ServerImpl::OnUpdateInputPosition(WEASEL_IPC_COMMAND uMsg,
   return 0;
 }
 
+DWORD ServerImpl::OnSetContext(WEASEL_IPC_COMMAND uMsg,
+                               DWORD wParam,
+                               DWORD lParam) {
+  if (!m_pRequestHandler)
+    return 0;
+  m_pRequestHandler->SetSurroundingText(
+      reinterpret_cast<LPWSTR>(channel->ReceiveBuffer()), lParam);
+  return 1;
+}
+
 DWORD ServerImpl::OnStartMaintenance(WEASEL_IPC_COMMAND uMsg,
                                      DWORD wParam,
                                      DWORD lParam) {
@@ -400,6 +430,7 @@ void ServerImpl::HandlePipeMessage(PipeMessage pipe_msg, _Resp resp) {
   PIPE_MSG_HANDLE(WEASEL_IPC_FOCUS_IN, OnFocusIn)
   PIPE_MSG_HANDLE(WEASEL_IPC_FOCUS_OUT, OnFocusOut)
   PIPE_MSG_HANDLE(WEASEL_IPC_UPDATE_INPUT_POS, OnUpdateInputPosition)
+  PIPE_MSG_HANDLE(WEASEL_IPC_SET_CONTEXT, OnSetContext)
   PIPE_MSG_HANDLE(WEASEL_IPC_START_MAINTENANCE, OnStartMaintenance)
   PIPE_MSG_HANDLE(WEASEL_IPC_END_MAINTENANCE, OnEndMaintenance)
   PIPE_MSG_HANDLE(WEASEL_IPC_COMMIT_COMPOSITION, OnCommitComposition)
@@ -481,6 +512,10 @@ void Server::AddMenuHandler(UINT uID, CommandHandler handler) {
 
 void Server::SetTrayRefreshCallback(std::function<void()> callback) {
   m_pImpl->SetTrayRefreshCallback(callback);
+}
+
+void Server::Post(std::function<void()> fn) {
+  m_pImpl->Post(std::move(fn));
 }
 
 HWND Server::GetHWnd() {

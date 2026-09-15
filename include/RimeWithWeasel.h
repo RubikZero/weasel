@@ -56,6 +56,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   virtual void FocusIn(DWORD param, WeaselSessionId ipc_id);
   virtual void FocusOut(DWORD param, WeaselSessionId ipc_id);
   virtual void UpdateInputPosition(RECT const& rc, WeaselSessionId ipc_id);
+  virtual void SetSurroundingText(LPWSTR buffer, WeaselSessionId ipc_id);
   virtual void StartMaintenance();
   virtual void EndMaintenance();
   virtual void SetOption(WeaselSessionId ipc_id,
@@ -64,6 +65,10 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   virtual void UpdateColorTheme(BOOL darkMode);
 
   void OnUpdateUI(std::function<void()> const& cb);
+  // Register a poster that runs a callback on the server message thread.
+  void OnPostToServerThread(std::function<void(std::function<void()>)> poster) {
+    m_post_to_server_thread = std::move(poster);
+  }
 
  private:
   void _Setup();
@@ -105,6 +110,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   std::map<std::string, bool> m_show_notifications;
   std::map<std::string, bool> m_show_notifications_base;
   std::function<void()> _UpdateUICallback;
+  std::function<void(std::function<void()>)> m_post_to_server_thread;
 
   static void OnNotify(void* context_object,
                        uintptr_t session_id,

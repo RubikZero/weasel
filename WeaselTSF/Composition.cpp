@@ -209,6 +209,78 @@ STDMETHODIMP CGetTextExtentEditSession::DoEditSession(TfEditCookie ec) {
   return S_OK;
 }
 
+/* Get Surrounding Text (cursor context before the caret) */
+static const size_t kMaxSurroundingText = 256;
+
+class CGetSurroundingTextEditSession : public CEditSession {
+ public:
+  CGetSurroundingTextEditSession(com_ptr<WeaselTSF> pTextService,
+                                 com_ptr<ITfContext> pContext)
+      : CEditSession(pTextService, pContext) {}
+
+  /* ITfEditSession */
+  STDMETHODIMP DoEditSession(TfEditCookie ec);
+};
+
+STDMETHODIMP CGetSurroundingTextEditSession::DoEditSession(TfEditCookie ec) {
+  TF_SELECTION selection;
+  ULONG nSelection = 0;
+  if (FAILED(_pContext->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &selection,
+                                     &nSelection)) ||
+      nSelection != 1 || selection.range == nullptr) {
+    return E_FAIL;
+  }
+  com_ptr<ITfRange> pRange;
+  HRESULT hr = selection.range->Clone(&pRange);
+  selection.range->Release();
+  if (FAILED(hr) || pRange == nullptr)
+    return E_FAIL;
+  pRange->Collapse(ec, TF_ANCHOR_END);
+  LONG shifted = 0;
+  pRange->ShiftStart(ec, -static_cast<LONG>(kMaxSurroundingText), &shifted,
+                     nullptr);
+  WCHAR buffer[kMaxSurroundingText + 1] = {0};
+  ULONG fetched = 0;
+  hr = pRange->GetText(ec, 0, buffer, kMaxSurroundingText, &fetched);
+  if (hr == S_OK || hr == S_FALSE) {
+    std::wstring text(buffer, fetched);
+    for (auto& ch : text) {
+      if (ch == L'\r' || ch == L'\n' || ch == L'\t')
+        ch = L' ';
+    }
+    _pTextService->_SetSurroundingText(text);
+  }
+  return S_OK;
+}
+
+void WeaselTSF::_RequestSurroundingText(com_ptr<ITfContext> pContext) {
+  if (!pContext)
+    return;
+  com_ptr<CGetSurroundingTextEditSession> pEditSession;
+  pEditSession.Attach(new CGetSurroundingTextEditSession(this, pContext));
+  if (pEditSession == NULL)
+    return;
+  HRESULT hr;
+  pContext->RequestEditSession(_tfClientId, pEditSession,
+                               TF_ES_ASYNCDONTCARE | TF_ES_READ, &hr);
+}
+
+void WeaselTSF::_SetSurroundingText(const std::wstring& text) {
+  _surrounding_text = text;
+  _surrounding_text_dirty = false;
+}
+
+void WeaselTSF::_SendSurroundingText() {
+  const ULONGLONG now = GetTickCount64();
+  if ((_surrounding_text_dirty || _surrounding_text.empty()) &&
+      _pTextEditSinkContext && now - _surrounding_text_request_tick > 200) {
+    _surrounding_text_request_tick = now;
+    _RequestSurroundingText(_pTextEditSinkContext);
+  }
+  if (!_surrounding_text.empty())
+    m_client.SetSurroundingText(_surrounding_text);
+}
+
 /* Composition Window Handling */
 BOOL WeaselTSF::_UpdateCompositionWindow(com_ptr<ITfContext> pContext) {
   com_ptr<ITfContextView> pContextView;

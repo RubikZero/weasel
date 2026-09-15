@@ -24,6 +24,7 @@ class ClientImpl {
   bool HighlightCandidateOnCurrentPage(size_t index);
   bool ChangePage(bool backward);
   void UpdateInputPosition(RECT const& rc);
+  void SetSurroundingText(const std::wstring& text);
   void FocusIn();
   void FocusOut();
   void TrayCommand(UINT menuId);

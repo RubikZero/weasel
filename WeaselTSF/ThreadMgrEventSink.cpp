@@ -12,6 +12,7 @@ STDMETHODIMP WeaselTSF::OnUninitDocumentMgr(ITfDocumentMgr* pDocMgr) {
 STDMETHODIMP WeaselTSF::OnSetFocus(ITfDocumentMgr* pDocMgrFocus,
                                    ITfDocumentMgr* pDocMgrPrevFocus) {
   _InitTextEditSink(pDocMgrFocus);
+  _surrounding_text_dirty = true;
 
   com_ptr<ITfDocumentMgr> pCandidateListDocumentMgr;
   com_ptr<ITfContext> pTfContext = _GetUIContextDocument();

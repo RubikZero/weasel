@@ -27,6 +27,7 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
     /* Unknown key event */
     *pfEaten = FALSE;
   } else {
+    _SendSurroundingText();
     // cheet key code when vertical auto reverse happened, swap up and down
     if (_cand->GetIsReposition()) {
       if (ke.keycode == ibus::Up)
@@ -63,11 +64,14 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
 }
 
 STDMETHODIMP WeaselTSF::OnSetFocus(BOOL fForeground) {
-  if (fForeground)
+  if (fForeground) {
+    _surrounding_text_dirty = true;
     m_client.FocusIn();
-  else {
+  } else {
     m_client.FocusOut();
     _AbortComposition();
+    _surrounding_text.clear();
+    _surrounding_text_dirty = true;
   }
 
   return S_OK;

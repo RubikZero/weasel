@@ -130,6 +130,9 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   HWND _GetFocusedContextWindow();
   void _HandleLangBarMenuSelect(UINT wID);
 
+  /* Surrounding text (cursor context) */
+  void _SetSurroundingText(const std::wstring& text);
+
   /* IPC */
   bool _EnsureServerConnected();
 
@@ -173,6 +176,8 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   BOOL _InitKeyEventSink();
   void _UninitKeyEventSink();
   void _ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten);
+  void _RequestSurroundingText(com_ptr<ITfContext> pContext);
+  void _SendSurroundingText();
 
   BOOL _InitPreservedKey();
   void _UninitPreservedKey();
@@ -209,6 +214,11 @@ class WeaselTSF : public ITfTextInputProcessorEx,
 
   com_ptr<ITfContext> _pEditSessionContext;
   std::wstring _editSessionText;
+
+  /* cursor context (surrounding text before the caret) */
+  std::wstring _surrounding_text;
+  bool _surrounding_text_dirty = true;
+  ULONGLONG _surrounding_text_request_tick = 0;
 
   com_ptr<CCompartmentEventSink> _pKeyboardCompartmentSink;
   com_ptr<CCompartmentEventSink> _pConvertionCompartmentSink;

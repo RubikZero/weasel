@@ -32,12 +32,16 @@ enum WEASEL_IPC_COMMAND {
   WEASEL_IPC_SELECT_CANDIDATE_ON_CURRENT_PAGE,
   WEASEL_IPC_HIGHLIGHT_CANDIDATE_ON_CURRENT_PAGE,
   WEASEL_IPC_CHANGE_PAGE,
+  WEASEL_IPC_SET_CONTEXT,
   WEASEL_IPC_LAST_COMMAND
 };
 
 // Posted by WeaselTrayIcon to the server window so that Shell_NotifyIcon runs
 // on the server message thread instead of a pipe worker thread.
 #define WM_WEASEL_SERVICE_NOTIFY (WEASEL_IPC_LAST_COMMAND + 200)
+// Posted by worker threads to run a callback on the server message thread
+// (e.g. refreshing the candidate window after async language-model decoding).
+#define WM_WEASEL_POST_CALLBACK (WEASEL_IPC_LAST_COMMAND + 201)
 
 namespace weasel {
 struct PipeMessage {
@@ -81,6 +85,8 @@ struct RequestHandler {
   virtual void FocusIn(DWORD param, DWORD session_id) {}
   virtual void FocusOut(DWORD param, DWORD session_id) {}
   virtual void UpdateInputPosition(RECT const& rc, DWORD session_id) {}
+  // Surrounding text (cursor context) provided by the TSF client.
+  virtual void SetSurroundingText(LPWSTR buffer, DWORD session_id) {}
   virtual void StartMaintenance() {}
   virtual void EndMaintenance() {}
   virtual void SetOption(DWORD session_id, const std::string& opt, bool val) {}
@@ -138,6 +144,8 @@ class Client {
   bool ChangePage(bool backward);
   // 更新输入位置
   void UpdateInputPosition(RECT const& rc);
+  // 发送光标前上下文文本（供语言模型重排/整句生成）
+  void SetSurroundingText(const std::wstring& text);
   // 输入窗口获得焦点
   void FocusIn();
   // 输入窗口失去焦点
@@ -170,6 +178,9 @@ class Server {
   // Callback invoked on the server message thread when a tray icon refresh is
   // requested from a pipe worker thread.
   void SetTrayRefreshCallback(std::function<void()> callback);
+
+  // Run a callback on the server message thread (thread-safe, from any thread).
+  void Post(std::function<void()> fn);
 
  private:
   ServerImpl* m_pImpl;

@@ -24,6 +24,8 @@ STDMETHODIMP WeaselTSF::OnEndEdit(ITfContext* pContext,
   IEnumTfRanges* pEnumTextChanges;
   ITfRange* pRange;
 
+  _surrounding_text_dirty = true;
+
   /* did the selection change? */
   if (pEditRecord->GetSelectionStatus(&fSelectionChanged) == S_OK &&
       fSelectionChanged) {
@@ -59,6 +61,9 @@ STDMETHODIMP WeaselTSF::OnEndEdit(ITfContext* pContext,
 STDMETHODIMP WeaselTSF::OnLayoutChange(ITfContext* pContext,
                                        TfLayoutCode lcode,
                                        ITfContextView* pContextView) {
+  if (lcode == TF_LC_CHANGE)
+    _surrounding_text_dirty = true;
+
   if (!_IsComposing())
     return S_OK;
 
