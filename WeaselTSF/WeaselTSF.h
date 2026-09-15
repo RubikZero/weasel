@@ -217,6 +217,7 @@ class WeaselTSF : public ITfTextInputProcessorEx,
 
   /* cursor context (surrounding text before the caret) */
   std::wstring _surrounding_text;
+  std::wstring _surrounding_text_last_sent;
   bool _surrounding_text_dirty = true;
   ULONGLONG _surrounding_text_request_tick = 0;
 

@@ -1,6 +1,8 @@
 ﻿#include "stdafx.h"
 #include "WeaselServerImpl.h"
+#include <memory>
 #include <mutex>
+#include <new>
 #include <Windows.h>
 #include <resource.h>
 #include <WeaselUtility.h>
@@ -148,10 +150,10 @@ LRESULT ServerImpl::OnPostCallbackMessage(UINT uMsg,
                                           WPARAM wParam,
                                           LPARAM lParam,
                                           BOOL& bHandled) {
-  auto* fn = reinterpret_cast<std::function<void()>*>(lParam);
-  if (fn) {
+  std::unique_ptr<std::function<void()>> fn(
+      reinterpret_cast<std::function<void()>*>(lParam));
+  if (fn && *fn) {
     (*fn)();
-    delete fn;
   }
   return 0;
 }
@@ -159,9 +161,13 @@ LRESULT ServerImpl::OnPostCallbackMessage(UINT uMsg,
 void ServerImpl::Post(std::function<void()> fn) {
   if (m_hWnd == NULL)
     return;
-  PostMessage(WM_WEASEL_POST_CALLBACK, 0,
-              reinterpret_cast<LPARAM>(new std::function<void()>(
-                  std::move(fn))));
+  auto* task = new (std::nothrow) std::function<void()>(std::move(fn));
+  if (!task)
+    return;
+  if (!PostMessage(WM_WEASEL_POST_CALLBACK, 0,
+                   reinterpret_cast<LPARAM>(task))) {
+    delete task;
+  }
 }
 
 DWORD ServerImpl::OnCommand(WEASEL_IPC_COMMAND uMsg,
@@ -328,7 +334,7 @@ DWORD ServerImpl::OnUpdateInputPosition(WEASEL_IPC_COMMAND uMsg,
 DWORD ServerImpl::OnSetContext(WEASEL_IPC_COMMAND uMsg,
                                DWORD wParam,
                                DWORD lParam) {
-  if (!m_pRequestHandler)
+  if (!m_pRequestHandler || !channel)
     return 0;
   m_pRequestHandler->SetSurroundingText(
       reinterpret_cast<LPWSTR>(channel->ReceiveBuffer()), lParam);

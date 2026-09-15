@@ -393,7 +393,10 @@ void RimeWithWeaselHandler::SetSurroundingText(LPWSTR buffer,
       break;
     }
   }
-  RimeSessionId session_id = to_session_id(ipc_id);
+  RimeSessionId session_id = 0;
+  auto it = m_session_status_map.find(ipc_id);
+  if (it != m_session_status_map.end())
+    session_id = it->second.session_id;
   if (session_id) {
     rime_api->set_property(session_id, "surrounding_text", text.c_str());
   }

@@ -72,6 +72,10 @@ STDMETHODIMP WeaselTSF::OnSetFocus(BOOL fForeground) {
     _AbortComposition();
     _surrounding_text.clear();
     _surrounding_text_dirty = true;
+    if (!_surrounding_text_last_sent.empty()) {
+      m_client.SetSurroundingText(std::wstring());
+      _surrounding_text_last_sent.clear();
+    }
   }
 
   return S_OK;

@@ -226,8 +226,12 @@ STDMETHODIMP CGetSurroundingTextEditSession::DoEditSession(TfEditCookie ec) {
   TF_SELECTION selection;
   ULONG nSelection = 0;
   if (FAILED(_pContext->GetSelection(ec, TF_DEFAULT_SELECTION, 1, &selection,
-                                     &nSelection)) ||
-      nSelection != 1 || selection.range == nullptr) {
+                                     &nSelection))) {
+    return E_FAIL;
+  }
+  if (nSelection != 1 || selection.range == nullptr) {
+    if (selection.range)
+      selection.range->Release();
     return E_FAIL;
   }
   com_ptr<ITfRange> pRange;
@@ -277,8 +281,10 @@ void WeaselTSF::_SendSurroundingText() {
     _surrounding_text_request_tick = now;
     _RequestSurroundingText(_pTextEditSinkContext);
   }
-  if (!_surrounding_text.empty())
-    m_client.SetSurroundingText(_surrounding_text);
+  if (_surrounding_text == _surrounding_text_last_sent)
+    return;
+  m_client.SetSurroundingText(_surrounding_text);
+  _surrounding_text_last_sent = _surrounding_text;
 }
 
 /* Composition Window Handling */
