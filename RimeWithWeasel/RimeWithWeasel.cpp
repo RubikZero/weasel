@@ -419,12 +419,20 @@ void RimeWithWeaselHandler::OnNotify(void* context_object,
   if (!self || !message_type || !message_value)
     return;
   if (!strcmp(message_type, "lm_ranker")) {
-    // Async language-model decoding finished; refresh the candidate window on
-    // the server message thread so the promoted sentence becomes visible.
+    // Async language-model decoding finished; refresh the composition (so the
+    // promoted candidate becomes visible) and the candidate window, on the
+    // server message thread.
     WeaselSessionId ipc_id = self->m_active_session;
     if (self->m_post_to_server_thread) {
-      self->m_post_to_server_thread(
-          [self, ipc_id]() { self->_UpdateUI(ipc_id); });
+      self->m_post_to_server_thread([self, ipc_id]() {
+        RimeSessionId session_id = self->to_session_id(ipc_id);
+        if (session_id &&
+            RIME_API_AVAILABLE(rime_api,
+                               refresh_non_confirmed_composition)) {
+          rime_api->refresh_non_confirmed_composition(session_id);
+        }
+        self->_UpdateUI(ipc_id);
+      });
     }
     return;
   }
