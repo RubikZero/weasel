@@ -320,17 +320,13 @@ program_files:
 
   ExecWait '"$INSTDIR\WeaselSetup.exe" $R2'
 
-  ; Enable the lm_ranker filter for the bundled pinyin schemas.  Existing
-  ; user customizations are left untouched.
+  ; Enable the lm_ranker filter for the luna pinyin family.  All variants
+  ; (luna_pinyin, luna_pinyin_simp, luna_quanpin, luna_pinyin_fluency)
+  ; include luna_pinyin.schema and inherit its `luna_pinyin.custom` patch,
+  ; so a single file is enough and avoids duplicate filter entries.
   SetShellVarContext current
   CreateDirectory "$APPDATA\Rime"
-  Push "luna_pinyin_simp.custom.yaml"
-  Call WriteLmRankerPatch
   Push "luna_pinyin.custom.yaml"
-  Call WriteLmRankerPatch
-  Push "luna_quanpin.custom.yaml"
-  Call WriteLmRankerPatch
-  Push "luna_pinyin_fluency.custom.yaml"
   Call WriteLmRankerPatch
 
   ; Write the uninstall keys for Windows
