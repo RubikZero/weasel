@@ -178,10 +178,12 @@ call_uninstaller:
   ; Remove files and uninstaller
   Delete  "$R1\data\opencc\*.*"
   Delete  "$R1\data\preview\*.*"
+  Delete  "$R1\data\lm-mlm\*.*"
   Delete  "$R1\data\*.*"
   Delete  "$R1\*.*"
   RMDir   "$R1\data\opencc"
   RMDir   "$R1\data\preview"
+  RMDir   "$R1\data\lm-mlm"
   RMDir   "$R1\data"
   RMDir   "$R1"
   SetShellVarContext all
@@ -227,6 +229,9 @@ program_files:
   File "LICENSE.txt"
   File "README.txt"
   File "7-zip-license.txt"
+  File "LICENSE-ORT.txt"
+  File "THIRD-PARTY-NOTICES.txt"
+  File /nonfatal "ThirdPartyNotices-ORT.txt"
   File "7z.dll"
   File "7z.exe"
   File "COPYING-curl.txt"
@@ -251,16 +256,19 @@ program_files:
       File "WeaselDeployer.exe"
       File "WeaselServer.exe"
       File "rime.dll"
+      File "onnxruntime.dll"
       File "WinSparkle.dll"
     ${ElseIf} ${IsNativeAMD64}
       File "WeaselDeployer.exe"
       File "WeaselServer.exe"
       File "rime.dll"
+      File "onnxruntime.dll"
       File "WinSparkle.dll"
     ${Else}
       File "Win32\WeaselDeployer.exe"
       File "Win32\WeaselServer.exe"
       File "Win32\rime.dll"
+      File "Win32\onnxruntime.dll"
       File "Win32\WinSparkle.dll"
     ${Endif}
   ; install x64 build for NativeAMD64_BELLOW_WINDOWS11
@@ -269,11 +277,13 @@ program_files:
       File "WeaselDeployer.exe"
       File "WeaselServer.exe"
       File "rime.dll"
+      File "onnxruntime.dll"
       File "WinSparkle.dll"
     ${Else}
       File "Win32\WeaselDeployer.exe"
       File "Win32\WeaselServer.exe"
       File "Win32\rime.dll"
+      File "Win32\onnxruntime.dll"
       File "Win32\WinSparkle.dll"
     ${Endif}
   ${Endif}
@@ -291,6 +301,9 @@ program_files:
   ; images
   SetOutPath $INSTDIR\data\preview
   File "data\preview\*.png"
+  ; language model (shared copy; the plugin mirrors it to the user dir)
+  SetOutPath $INSTDIR\data\lm-mlm
+  File "data\lm-mlm\*.*"
 
   SetOutPath $INSTDIR
 
@@ -306,6 +319,19 @@ program_files:
   StrCpy $R2 "/t"
 
   ExecWait '"$INSTDIR\WeaselSetup.exe" $R2'
+
+  ; Enable the lm_ranker filter for the bundled pinyin schemas.  Existing
+  ; user customizations are left untouched.
+  SetShellVarContext current
+  CreateDirectory "$APPDATA\Rime"
+  Push "luna_pinyin_simp.custom.yaml"
+  Call WriteLmRankerPatch
+  Push "luna_pinyin.custom.yaml"
+  Call WriteLmRankerPatch
+  Push "luna_quanpin.custom.yaml"
+  Call WriteLmRankerPatch
+  Push "luna_pinyin_fluency.custom.yaml"
+  Call WriteLmRankerPatch
 
   ; Write the uninstall keys for Windows
   WriteRegStr HKLM "${REG_UNINST_KEY}" "DisplayName" "$(DISPLAYNAME)"
@@ -339,15 +365,8 @@ program_files:
   ; Start WeaselServer
   Exec "$INSTDIR\WeaselServer.exe"
 
-  ; option CheckForUpdates
-  IfSilent DisableAutoCheckUpdate
-  MessageBox MB_YESNO|MB_ICONINFORMATION "$(AUTOCHKUPDATE)" IDYES EnableAutoCheckUpdate
-  DisableAutoCheckUpdate:
+  ; updates are disabled in this build
   WriteRegStr HKCU "Software\Rime\Weasel\Updates" "CheckForUpdates" "0"
-  GoTo end
-  EnableAutoCheckUpdate:
-  WriteRegStr HKCU "Software\Rime\Weasel\Updates" "CheckForUpdates" "1"
-  end:
 
   ; Prompt reboot
   StrCmp $0 "Upgrade" 0 +2
@@ -375,6 +394,19 @@ SectionEnd
 
 ;--------------------------------
 
+; Write a schema override enabling lm_ranker, unless the user already has
+; one (never overwrite user customizations).
+; Usage: Push "<schema>.custom.yaml" ; Call WriteLmRankerPatch
+Function WriteLmRankerPatch
+  Exch $R0
+  IfFileExists "$APPDATA\Rime\$R0" wlp_done
+  FileOpen $9 "$APPDATA\Rime\$R0" w
+  FileWrite $9 "patch:$\r$\n  engine/filters/+:$\r$\n    - lm_ranker$\r$\n"
+  FileClose $9
+wlp_done:
+  Pop $R0
+FunctionEnd
+
 ; Uninstaller
 
 Section "Uninstall"
@@ -398,10 +430,12 @@ Section "Uninstall"
   SetOutPath $TEMP
   Delete  "$INSTDIR\data\opencc\*.*"
   Delete  "$INSTDIR\data\preview\*.*"
+  Delete  "$INSTDIR\data\lm-mlm\*.*"
   Delete  "$INSTDIR\data\*.*"
   Delete  "$INSTDIR\*.*"
   RMDir  "$INSTDIR\data\opencc"
   RMDir  "$INSTDIR\data\preview"
+  RMDir  "$INSTDIR\data\lm-mlm"
   RMDir  "$INSTDIR\data"
   RMDir  "$INSTDIR"
   SetShellVarContext all

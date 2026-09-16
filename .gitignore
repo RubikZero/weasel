@@ -56,3 +56,7 @@ arm64x_wrapper/*.dll
 arm64x_wrapper/*.ime
 arm64x_wrapper/*.lib
 arm64x_wrapper/*.exp
+# language model (staged from third-party by the build, shipped by the installer)
+/output/data/lm-mlm/
+!/output/THIRD-PARTY-NOTICES.txt
+!/output/LICENSE-ORT.txt

@@ -1,0 +1,32 @@
+Third-party notices for the lm_ranker sentence-prediction feature
+=================================================================
+
+This build of Weasel bundles a small masked language model used to rerank
+candidates and to predict whole sentences while typing Chinese pinyin.
+
+1. ONNX Runtime
+---------------
+   Files: onnxruntime.dll (x64 / Win32), runtime CPU execution provider.
+   License: MIT.  See LICENSE-ORT.txt and ThirdPartyNotices-ORT.txt.
+   Copyright (c) Microsoft Corporation.
+
+2. Masked language model (lm_ranker)
+------------------------------------
+   Files: data\lm-mlm\model.onnx, data\lm-mlm\vocab.txt,
+          data\lm-mlm\syllable_readings.tsv, data\lm-mlm\lm_config.json
+
+   The model is a fine-tuned variant of Chinese-BERT-wwm (whole word
+   masking), a 4-layer / 256-hidden distilled checkpoint:
+       https://github.com/ymcui/Chinese-BERT-wwm
+   The base checkpoint does not carry an explicit license; it is used here
+   with attribution.  Fine-tuning data: CLUECorpusSmall (MIT license),
+   plus open-source sentence corpora used for evaluation only.
+
+   If you redistribute this installer, keep this notice together with the
+   model files inside data\lm-mlm\.
+
+3. Rime / Weasel
+----------------
+   Weasel is licensed under GPLv3; see LICENSE.txt in the installation
+   directory.  This installer includes a modified librime with the
+   lm_ranker plugin merged into rime.dll.
