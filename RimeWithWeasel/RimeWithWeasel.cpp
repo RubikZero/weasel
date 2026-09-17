@@ -112,6 +112,11 @@ void RimeWithWeaselHandler::Initialize() {
 
   LOG(INFO) << "Initializing la rime.";
   rime_api->initialize(NULL);
+  // RimeInitialize() loads modules and may restart the service during a
+  // maintenance cycle.  Register only after it has completed so asynchronous
+  // plug-in notifications (lm_ranker in particular) always target this live
+  // Weasel handler rather than a pre-initialization service state.
+  rime_api->set_notification_handler(&RimeWithWeaselHandler::OnNotify, this);
   if (rime_api->start_maintenance(/*full_check = */ False)) {
     m_disabled = true;
     rime_api->join_maintenance_thread();
