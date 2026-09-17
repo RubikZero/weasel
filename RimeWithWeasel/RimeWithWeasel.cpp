@@ -729,21 +729,12 @@ void RimeWithWeaselHandler::_LoadSchemaSpecificSettings(
   _UpdateUIStyle(&config, m_ui, false);
   SessionStatus& session_status = get_session_status(ipc_id);
   session_status.style = m_ui->style();
-  session_status.lm_refresh_enabled = false;
-  if (m_lm_refresh_enabled) {
-    RimeConfigIterator filters = {0};
-    if (rime_api->config_begin_list(&filters, &config, "engine/filters")) {
-      while (rime_api->config_next(&filters)) {
-      char filter[128] = {0};
-      if (rime_api->config_get_string(&config, filters.path, filter,
-                                      sizeof(filter)) &&
-          std::string(filter) == "lm_ranker") {
-        session_status.lm_refresh_enabled = true;
-      }
-      }
-      rime_api->config_end(&filters);
-    }
-  }
+  // ui_refresh is an explicit host-side setting.  Do not try to infer it
+  // from engine/filters: schema_open()/config iteration is not a reliable
+  // reflection of the live session in every host, and a false negative means
+  // an asynchronous LM result can never reach the candidate UI.  On schemas
+  // without lm_ranker this is only a bounded, no-op response refresh.
+  session_status.lm_refresh_enabled = m_lm_refresh_enabled;
   UIStyle& style = session_status.style;
   // load schema color style config
   const int BUF_SIZE = 255;
