@@ -15,10 +15,12 @@
 #include <msctf.h>
 #include <assert.h>
 
-#include <atlcomcli.h> 
+#include <atlcomcli.h>
 
+#include <algorithm>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 
 template<typename I>

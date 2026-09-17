@@ -492,6 +492,7 @@ STDMETHODIMP WeaselTSF::OnCompositionTerminated(TfEditCookie ecWrite,
 }
 
 void WeaselTSF::_AbortComposition(bool clear) {
+  _CancelLmRefresh();
   m_client.ClearComposition();
   if (_IsComposing()) {
     _EndComposition(_pEditSessionContext, clear);

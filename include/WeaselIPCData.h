@@ -187,9 +187,19 @@ struct Status {
 
 // 用於向前端告知設置信息
 struct Config {
-  Config() : inline_preedit(false) {}
-  void reset() { inline_preedit = false; }
+  Config() { reset(); }
+  void reset() {
+    inline_preedit = false;
+    lm_refresh_enabled = false;
+    lm_refresh_initial_ms = 120;
+    lm_refresh_interval_ms = 120;
+    lm_refresh_timeout_ms = 1500;
+  }
   bool inline_preedit;
+  bool lm_refresh_enabled;
+  int lm_refresh_initial_ms;
+  int lm_refresh_interval_ms;
+  int lm_refresh_timeout_ms;
 };
 
 struct UIStyle {

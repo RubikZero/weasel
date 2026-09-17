@@ -23,13 +23,18 @@ typedef std::map<std::string, AppOptions, CaseInsensitiveCompare>
     AppOptionsByAppName;
 
 struct SessionStatus {
-  SessionStatus() : style(weasel::UIStyle()), __synced(false), session_id(0) {
+  SessionStatus()
+      : style(weasel::UIStyle()),
+        __synced(false),
+        session_id(0),
+        lm_refresh_enabled(false) {
     RIME_STRUCT(RimeStatus, status);
   }
   weasel::UIStyle style;
   RimeStatus status;
   bool __synced;
   RimeSessionId session_id;
+  bool lm_refresh_enabled;
 };
 typedef std::map<DWORD, SessionStatus> SessionStatusMap;
 typedef DWORD WeaselSessionId;
@@ -87,6 +92,7 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
                   weasel::Context& ctx);
   void _GetContext(weasel::Context& ctx, RimeSessionId session_id);
   void _UpdateShowNotifications(RimeConfig* config, bool initialize = false);
+  void _LoadLmRefreshSettings();
 
   void _UpdateInlinePreeditStatus(WeaselSessionId ipc_id);
 
@@ -125,5 +131,9 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   bool m_current_dark_mode;
   bool m_global_ascii_mode;
   int m_show_notifications_time;
+  bool m_lm_refresh_enabled;
+  int m_lm_refresh_initial_ms;
+  int m_lm_refresh_interval_ms;
+  int m_lm_refresh_timeout_ms;
   DWORD m_pid;
 };

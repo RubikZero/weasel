@@ -38,6 +38,7 @@ WeaselTSF::WeaselTSF() {
 }
 
 WeaselTSF::~WeaselTSF() {
+  _CancelLmRefresh();
   DllRelease();
 }
 
@@ -97,6 +98,7 @@ STDMETHODIMP WeaselTSF::Activate(ITfThreadMgr* pThreadMgr,
 }
 
 STDMETHODIMP WeaselTSF::Deactivate() {
+  _CancelLmRefresh();
   m_client.EndSession();
 
   _InitTextEditSink(com_ptr<ITfDocumentMgr>());

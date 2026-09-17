@@ -13,6 +13,16 @@ STDMETHODIMP WeaselTSF::DoEditSession(TfEditCookie ec) {
 
   bool ok = m_client.GetResponseData(std::ref(parser));
 
+  if (ok) {
+    _lm_refresh_enabled = config.lm_refresh_enabled;
+    _lm_refresh_initial_ms =
+        std::clamp<int>(config.lm_refresh_initial_ms, 20, 1000);
+    _lm_refresh_interval_ms =
+        std::clamp<int>(config.lm_refresh_interval_ms, 30, 1000);
+    _lm_refresh_timeout_ms = std::clamp<int>(config.lm_refresh_timeout_ms,
+                                             _lm_refresh_initial_ms, 5000);
+  }
+
   _UpdateLanguageBar(_status);
 
   bool compositionEnded = false;
@@ -51,6 +61,10 @@ STDMETHODIMP WeaselTSF::DoEditSession(TfEditCookie ec) {
 
   if (ok && !compositionEnded)
     _UpdateCompositionWindow(_pEditSessionContext);
+  if (ok && (!_status.composing || !_lm_refresh_enabled))
+    _CancelLmRefresh();
+  else if (ok && !_lm_refresh_timer)
+    _ScheduleLmRefresh();
   // Keep the existing candidate window alive during top-word input, but
   // publish the new candidates in this key-down edit session. Positioning is
   // still updated by the queued read session after the new composition is

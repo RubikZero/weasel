@@ -6,6 +6,9 @@
 #include <WeaselUtility.h>
 
 #include <filesystem>
+#include <algorithm>
+#include <cctype>
+#include <fstream>
 #include <map>
 #include <array>
 #include <vector>
@@ -41,6 +44,10 @@ RimeWithWeaselHandler::RimeWithWeaselHandler(UI* ui)
       m_current_dark_mode(false),
       m_global_ascii_mode(false),
       m_show_notifications_time(1200),
+      m_lm_refresh_enabled(true),
+      m_lm_refresh_initial_ms(120),
+      m_lm_refresh_interval_ms(120),
+      m_lm_refresh_timeout_ms(1500),
       _UpdateUICallback(NULL) {
   m_ui->InServer() = true;
   rime_api = rime_get_api();
@@ -148,7 +155,100 @@ void RimeWithWeaselHandler::Initialize() {
     _LoadAppOptions(&config, m_app_options);
     rime_api->config_close(&config);
   }
+  _LoadLmRefreshSettings();
   m_last_schema_id.clear();
+}
+
+void RimeWithWeaselHandler::_LoadLmRefreshSettings() {
+  constexpr int kDefaultInitialMs = 120;
+  constexpr int kDefaultIntervalMs = 120;
+  constexpr int kDefaultTimeoutMs = 1500;
+  m_lm_refresh_enabled = true;
+  m_lm_refresh_initial_ms = kDefaultInitialMs;
+  m_lm_refresh_interval_ms = kDefaultIntervalMs;
+  m_lm_refresh_timeout_ms = kDefaultTimeoutMs;
+
+  // lm_ranker deliberately reads its own raw user file rather than the Rime
+  // deployment output.  Mirror just this small UI subsection here so both
+  // sides use the same configuration without adding yaml-cpp to WeaselServer.
+  std::ifstream file(WeaselUserDataPath() / "lm_ranker.yaml");
+  std::string line;
+  int lm_indent = -1;
+  int lm_child_indent = -1;
+  int refresh_indent = -1;
+  int refresh_child_indent = -1;
+  const auto trim = [](std::string text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+      return std::string();
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+  };
+  const auto parse_int = [](const std::string& text, int* value) {
+    try {
+      size_t consumed = 0;
+      const int parsed = std::stoi(text, &consumed);
+      if (consumed == text.size())
+        *value = parsed;
+    } catch (...) {
+    }
+  };
+  while (std::getline(file, line)) {
+    const auto comment = line.find('#');
+    if (comment != std::string::npos)
+      line.erase(comment);
+    const size_t indent = line.find_first_not_of(" \t");
+    const std::string text = trim(line);
+    const auto colon = text.find(':');
+    if (text.empty() || colon == std::string::npos)
+      continue;
+    const int level = static_cast<int>(indent);
+    const std::string key = trim(text.substr(0, colon));
+    const std::string value = trim(text.substr(colon + 1));
+    if (key == "lm_ranker" && value.empty()) {
+      lm_indent = level;
+      lm_child_indent = -1;
+      refresh_indent = -1;
+      refresh_child_indent = -1;
+      continue;
+    }
+    if (lm_indent < 0 || level <= lm_indent)
+      continue;
+    if (lm_child_indent < 0)
+      lm_child_indent = level;
+    if (level == lm_child_indent && key == "enabled") {
+      std::string normalized = value;
+      std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                     [](unsigned char c) { return std::tolower(c); });
+      m_lm_refresh_enabled = normalized != "false" && normalized != "0" &&
+                             normalized != "no";
+      continue;
+    }
+    if (level == lm_child_indent && key == "ui_refresh" && value.empty()) {
+      refresh_indent = level;
+      refresh_child_indent = -1;
+      continue;
+    }
+    if (refresh_indent < 0 || level <= refresh_indent)
+      continue;
+    if (refresh_child_indent < 0)
+      refresh_child_indent = level;
+    if (level != refresh_child_indent)
+      continue;
+    if (key == "initial_ms")
+      parse_int(value, &m_lm_refresh_initial_ms);
+    else if (key == "interval_ms")
+      parse_int(value, &m_lm_refresh_interval_ms);
+    else if (key == "timeout_ms")
+      parse_int(value, &m_lm_refresh_timeout_ms);
+  }
+
+  m_lm_refresh_initial_ms =
+      std::clamp(m_lm_refresh_initial_ms, 20, 1000);
+  m_lm_refresh_interval_ms =
+      std::clamp(m_lm_refresh_interval_ms, 30, 1000);
+  m_lm_refresh_timeout_ms = std::clamp(m_lm_refresh_timeout_ms,
+                                       m_lm_refresh_initial_ms, 5000);
 }
 
 void RimeWithWeaselHandler::Finalize() {
@@ -629,6 +729,21 @@ void RimeWithWeaselHandler::_LoadSchemaSpecificSettings(
   _UpdateUIStyle(&config, m_ui, false);
   SessionStatus& session_status = get_session_status(ipc_id);
   session_status.style = m_ui->style();
+  session_status.lm_refresh_enabled = false;
+  if (m_lm_refresh_enabled) {
+    RimeConfigIterator filters = {0};
+    if (rime_api->config_begin_list(&filters, &config, "engine/filters")) {
+      while (rime_api->config_next(&filters)) {
+      char filter[128] = {0};
+      if (rime_api->config_get_string(&config, filters.path, filter,
+                                      sizeof(filter)) &&
+          std::string(filter) == "lm_ranker") {
+        session_status.lm_refresh_enabled = true;
+      }
+      }
+      rime_api->config_end(&filters);
+    }
+  }
   UIStyle& style = session_status.style;
   // load schema color style config
   const int BUF_SIZE = 255;
@@ -961,6 +1076,18 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
   actions.push_back("config");
   body.append(L"config.inline_preedit=")
       .append(std::to_wstring((int)session_status.style.inline_preedit))
+      .append(L"\n");
+  body.append(L"config.lm_refresh_enabled=")
+      .append(std::to_wstring((int)session_status.lm_refresh_enabled))
+      .append(L"\n")
+      .append(L"config.lm_refresh_initial_ms=")
+      .append(std::to_wstring(m_lm_refresh_initial_ms))
+      .append(L"\n")
+      .append(L"config.lm_refresh_interval_ms=")
+      .append(std::to_wstring(m_lm_refresh_interval_ms))
+      .append(L"\n")
+      .append(L"config.lm_refresh_timeout_ms=")
+      .append(std::to_wstring(m_lm_refresh_timeout_ms))
       .append(L"\n");
 
   // style
