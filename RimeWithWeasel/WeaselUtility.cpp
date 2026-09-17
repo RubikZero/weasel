@@ -5,6 +5,14 @@
 
 fs::path WeaselUserDataPath() {
   WCHAR _path[MAX_PATH] = {0};
+  // An opt-in per-process override used by the integration harness.  It
+  // avoids changing HKCU or touching the user's live Rime directory when a
+  // second, isolated WeaselServer is launched for testing.
+  DWORD env_len = GetEnvironmentVariableW(L"RIME_WEASEL_USER_DIR", _path,
+                                           _countof(_path));
+  if (env_len > 0 && env_len < _countof(_path)) {
+    return fs::path(_path);
+  }
   const WCHAR KEY[] = L"Software\\Rime\\Weasel";
   HKEY hKey;
   LSTATUS ret = RegOpenKey(HKEY_CURRENT_USER, KEY, &hKey);

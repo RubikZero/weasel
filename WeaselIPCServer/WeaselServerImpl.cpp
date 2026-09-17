@@ -191,6 +191,17 @@ DWORD ServerImpl::OnCommand(WEASEL_IPC_COMMAND uMsg,
 HWND ServerImpl::Start() {
   std::wstring instanceName = L"(WEASEL)Furandōru-Sukāretto-";
   instanceName += getUsername();
+  // A private test pipe denotes an isolated server instance.  Keep the
+  // production single-instance mutex unchanged, while allowing that harness
+  // to coexist with the user's active WeaselServer.
+  wchar_t test_pipe_name[MAX_PATH] = {0};
+  DWORD env_len = GetEnvironmentVariableW(L"RIME_WEASEL_PIPE_NAME",
+                                           test_pipe_name,
+                                           _countof(test_pipe_name));
+  if (env_len > 0 && env_len < _countof(test_pipe_name)) {
+    instanceName += L"-";
+    instanceName += test_pipe_name;
+  }
   HANDLE hMutexOneInstance = ::CreateMutex(NULL, FALSE, instanceName.c_str());
   bool areYouOK = (::GetLastError() == ERROR_ALREADY_EXISTS ||
                    ::GetLastError() == ERROR_ACCESS_DENIED);

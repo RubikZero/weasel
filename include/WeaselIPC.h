@@ -193,7 +193,16 @@ inline std::wstring GetPipeName() {
   pipe_name += L"\\\\.\\pipe\\";
   pipe_name += getUsername();
   pipe_name += L"\\";
-  pipe_name += WEASEL_IPC_PIPE_NAME;
+  // Keep production clients on the historical pipe.  Tests may give a
+  // separate WeaselServer a private pipe name without unregistering or
+  // stopping the user's normal input method.
+  wchar_t test_pipe_name[MAX_PATH] = {0};
+  DWORD env_len = GetEnvironmentVariableW(L"RIME_WEASEL_PIPE_NAME",
+                                           test_pipe_name,
+                                           _countof(test_pipe_name));
+  pipe_name += (env_len > 0 && env_len < _countof(test_pipe_name))
+                   ? test_pipe_name
+                   : WEASEL_IPC_PIPE_NAME;
   return pipe_name;
 }
 }  // namespace weasel
