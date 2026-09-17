@@ -30,6 +30,8 @@ using namespace weasel;
 
 extern CAppModule _Module;
 
+static std::mutex g_api_mutex;
+
 ServerImpl::ServerImpl()
     : m_pRequestHandler(NULL),
       m_darkMode(IsUserDarkMode()),
@@ -170,6 +172,14 @@ void ServerImpl::Post(std::function<void()> fn) {
   }
 }
 
+void ServerImpl::PostRime(std::function<void()> fn) {
+  Post([fn = std::move(fn)]() mutable {
+    std::lock_guard<std::mutex> lock(g_api_mutex);
+    if (fn)
+      fn();
+  });
+}
+
 DWORD ServerImpl::OnCommand(WEASEL_IPC_COMMAND uMsg,
                             DWORD wParam,
                             DWORD lParam) {
@@ -200,8 +210,6 @@ int ServerImpl::Stop() {
   PostMessage(WM_QUIT);
   return 0;
 }
-
-static std::mutex g_api_mutex;
 
 int ServerImpl::Run() {
   // This workaround causes a VC internal error:
@@ -522,6 +530,10 @@ void Server::SetTrayRefreshCallback(std::function<void()> callback) {
 
 void Server::Post(std::function<void()> fn) {
   m_pImpl->Post(std::move(fn));
+}
+
+void Server::PostRime(std::function<void()> fn) {
+  m_pImpl->PostRime(std::move(fn));
 }
 
 HWND Server::GetHWnd() {

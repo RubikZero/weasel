@@ -102,6 +102,7 @@ class ServerImpl : public CWindowImpl<ServerImpl, CWindow, ServerWinTraits>
 
   // Run a callback on the server message thread.
   void Post(std::function<void()> fn);
+  void PostRime(std::function<void()> fn);
 
  private:
   void _Finailize();

@@ -181,6 +181,8 @@ class Server {
 
   // Run a callback on the server message thread (thread-safe, from any thread).
   void Post(std::function<void()> fn);
+  // Run a callback that touches librime, serialized with pipe API requests.
+  void PostRime(std::function<void()> fn);
 
  private:
   ServerImpl* m_pImpl;
