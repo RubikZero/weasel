@@ -420,18 +420,25 @@ void RimeWithWeaselHandler::OnNotify(void* context_object,
     return;
   if (!strcmp(message_type, "lm_ranker")) {
     // Async language-model decoding finished; refresh the composition (so the
-    // promoted candidate becomes visible) and the candidate window, on the
-    // server message thread.
-    WeaselSessionId ipc_id = self->m_active_session;
+    // promoted candidate becomes visible) on the server message thread.
+    //
+    // Do not capture m_active_session here: the notification originates from
+    // an LM worker, while focus changes and pipe requests update that field on
+    // the server thread.  Besides being a data race, an intervening focus-out
+    // made the old code refresh session 0, losing the result.  Recompose all
+    // live sessions on the serialized server thread; only the session whose
+    // input matches the cached LM result changes its candidate menu.
     if (self->m_post_to_server_thread) {
-      self->m_post_to_server_thread([self, ipc_id]() {
-        RimeSessionId session_id = self->to_session_id(ipc_id);
-        if (session_id &&
-            RIME_API_AVAILABLE(rime_api,
-                               refresh_non_confirmed_composition)) {
-          rime_api->refresh_non_confirmed_composition(session_id);
+      self->m_post_to_server_thread([self]() {
+        if (RIME_API_AVAILABLE(rime_api, refresh_non_confirmed_composition)) {
+          for (const auto& entry : self->m_session_status_map) {
+            RimeSessionId session_id = self->to_session_id(entry.first);
+            if (session_id)
+              rime_api->refresh_non_confirmed_composition(session_id);
+          }
         }
-        self->_UpdateUI(ipc_id);
+        if (self->m_active_session)
+          self->_UpdateUI(self->m_active_session);
       });
     }
     return;
