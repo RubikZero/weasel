@@ -332,6 +332,17 @@ void CCandidateList::EndUI() {
   _DisposeUIWindow();
 }
 
+bool CCandidateList::StartLmRefreshTimer(UINT initial_ms,
+                                         UINT interval_ms,
+                                         UINT attempts) {
+  return _ui && _ui->StartLmRefreshTimer(initial_ms, interval_ms, attempts);
+}
+
+void CCandidateList::StopLmRefreshTimer() {
+  if (_ui)
+    _ui->StopLmRefreshTimer();
+}
+
 com_ptr<ITfContext> CCandidateList::GetContextDocument() {
   return _pContextDocument;
 }
@@ -441,7 +452,9 @@ void WeaselTSF::HandleUICallback(size_t* const sel,
                                  size_t* const hov,
                                  bool* const next,
                                  bool* const scroll_next) {
-  if (sel)
+  if (!sel && !hov && !next && !scroll_next)
+    _PollLmRefresh();
+  else if (sel)
     _SelectCandidateOnCurrentPage(*sel);
   else if (hov)
     _HandleMouseHoverEvent(*hov);

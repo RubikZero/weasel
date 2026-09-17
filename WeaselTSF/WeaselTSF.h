@@ -179,10 +179,6 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   void _ScheduleLmRefresh();
   void _CancelLmRefresh();
   void _PollLmRefresh();
-  static void CALLBACK _LmRefreshTimerProc(HWND hwnd,
-                                            UINT message,
-                                            UINT_PTR timer_id,
-                                            DWORD time);
   void _RequestSurroundingText(com_ptr<ITfContext> pContext);
   void _SendSurroundingText();
 
@@ -225,10 +221,7 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   // Rime's language-model ranker publishes results asynchronously.  Named-pipe
   // IPC has no server-to-client push channel, so keep a short, UI-thread timer
   // while composing to retrieve the refreshed candidate snapshot.
-  UINT_PTR _lm_refresh_timer = 0;
-  HWND _lm_refresh_timer_window = nullptr;
-  unsigned int _lm_refresh_attempts = 0;
-  bool _lm_refresh_first_tick = false;
+  bool _lm_refresh_pending = false;
   bool _lm_refresh_enabled = false;
   UINT _lm_refresh_initial_ms = 120;
   UINT _lm_refresh_interval_ms = 120;

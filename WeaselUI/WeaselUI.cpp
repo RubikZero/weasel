@@ -23,6 +23,10 @@ class weasel::UIImpl {
   void Show();
   void Hide();
   void ShowWithTimeout(size_t millisec);
+  bool StartLmRefreshTimer(UINT initial_ms, UINT interval_ms, UINT attempts) {
+    return panel.StartLmRefreshTimer(initial_ms, interval_ms, attempts);
+  }
+  void StopLmRefreshTimer() { panel.StopLmRefreshTimer(); }
   bool IsShown() const { return shown; }
 
   static VOID CALLBACK OnTimer(_In_ HWND hwnd,
@@ -147,6 +151,16 @@ bool UI::IsCountingDown() const {
 
 bool UI::IsShown() const {
   return pimpl_ && pimpl_->IsShown();
+}
+
+bool UI::StartLmRefreshTimer(UINT initial_ms, UINT interval_ms, UINT attempts) {
+  return pimpl_ &&
+         pimpl_->StartLmRefreshTimer(initial_ms, interval_ms, attempts);
+}
+
+void UI::StopLmRefreshTimer() {
+  if (pimpl_)
+    pimpl_->StopLmRefreshTimer();
 }
 
 void UI::Refresh() {

@@ -35,6 +35,7 @@ class WeaselPanel
   MESSAGE_HANDLER(WM_MOUSEWHEEL, OnMouseWheel)
   MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
   MESSAGE_HANDLER(WM_MOUSELEAVE, OnMouseLeave)
+  MESSAGE_HANDLER(WM_TIMER, OnTimerMessage)
   CHAIN_MSG_MAP(CDoubleBufferImpl<WeaselPanel>)
   END_MSG_MAP()
 
@@ -56,6 +57,10 @@ class WeaselPanel
   LRESULT OnMouseWheel(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
   LRESULT OnMouseMove(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
   LRESULT OnMouseLeave(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled);
+  LRESULT OnTimerMessage(UINT uMsg,
+                         WPARAM wParam,
+                         LPARAM lParam,
+                         BOOL& bHandled);
 
   WeaselPanel(weasel::UI& ui);
   ~WeaselPanel();
@@ -65,12 +70,15 @@ class WeaselPanel
   void DoPaint(CDCHandle dc);
   bool GetIsReposition() { return m_istorepos; }
   void RedrawWindow();
+  bool StartLmRefreshTimer(UINT initial_ms, UINT interval_ms, UINT attempts);
+  void StopLmRefreshTimer();
 
   static VOID CALLBACK OnTimer(_In_ HWND hwnd,
                                _In_ UINT uMsg,
                                _In_ UINT_PTR idEvent,
                                _In_ DWORD dwTime);
   static const int AUTOREV_TIMER = 20240315;
+  static const int LM_REFRESH_TIMER = 20260918;
   static UINT_PTR ptimer;
 
  private:
@@ -148,5 +156,7 @@ class WeaselPanel
   float dpiScaleLayout = 1.0f;
   int m_hoverIndex = -1;
   HMONITOR m_hMonitor = NULL;
+  UINT lm_refresh_interval_ms_ = 0;
+  UINT lm_refresh_attempts_ = 0;
   bool m_redraw_by_monitor_change = false;
 };

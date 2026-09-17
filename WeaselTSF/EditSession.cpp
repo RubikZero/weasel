@@ -63,7 +63,7 @@ STDMETHODIMP WeaselTSF::DoEditSession(TfEditCookie ec) {
     _UpdateCompositionWindow(_pEditSessionContext);
   if (ok && (!_status.composing || !_lm_refresh_enabled))
     _CancelLmRefresh();
-  else if (ok && !_lm_refresh_timer)
+  else if (ok && !_lm_refresh_pending)
     _ScheduleLmRefresh();
   // Keep the existing candidate window alive during top-word input, but
   // publish the new candidates in this key-down edit session. Positioning is

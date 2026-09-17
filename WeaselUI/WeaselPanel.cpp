@@ -1125,6 +1125,24 @@ void WeaselPanel::RedrawWindow() {
   ReleaseDC(hdc);
 }
 
+bool WeaselPanel::StartLmRefreshTimer(UINT initial_ms,
+                                      UINT interval_ms,
+                                      UINT attempts) {
+  if (!IsWindow() || !attempts)
+    return false;
+  StopLmRefreshTimer();
+  lm_refresh_interval_ms_ = interval_ms;
+  lm_refresh_attempts_ = attempts;
+  return ::SetTimer(m_hWnd, LM_REFRESH_TIMER, initial_ms, nullptr) != 0;
+}
+
+void WeaselPanel::StopLmRefreshTimer() {
+  if (IsWindow())
+    ::KillTimer(m_hWnd, LM_REFRESH_TIMER);
+  lm_refresh_interval_ms_ = 0;
+  lm_refresh_attempts_ = 0;
+}
+
 void WeaselPanel::_LayerUpdate(const CRect& rc, CDCHandle dc) {
   HDC ScreenDC = ::GetDC(NULL);
   CRect rect;
@@ -1153,11 +1171,43 @@ LRESULT WeaselPanel::OnDestroy(UINT uMsg,
                                WPARAM wParam,
                                LPARAM lParam,
                                BOOL& bHandled) {
+  StopLmRefreshTimer();
   m_hoverIndex = -1;
   m_lastMousePos = {-1, -1};
   m_sticky = false;
   delete m_layout;
   m_layout = NULL;
+  return 0;
+}
+
+LRESULT WeaselPanel::OnTimerMessage(UINT uMsg,
+                                    WPARAM wParam,
+                                    LPARAM lParam,
+                                    BOOL& bHandled) {
+  if (wParam != LM_REFRESH_TIMER) {
+    bHandled = FALSE;
+    return 0;
+  }
+
+  if (!lm_refresh_attempts_) {
+    StopLmRefreshTimer();
+    bHandled = TRUE;
+    return 0;
+  }
+
+  --lm_refresh_attempts_;
+  // The first interval is intentionally shorter.  Subsequent refreshes use
+  // the configured polling interval without relying on the editor window's
+  // message queue.
+  ::SetTimer(m_hWnd, LM_REFRESH_TIMER, lm_refresh_interval_ms_, nullptr);
+  if (!lm_refresh_attempts_)
+    ::KillTimer(m_hWnd, LM_REFRESH_TIMER);
+
+  // All-null is reserved for an internal refresh request.  Existing mouse
+  // callbacks always carry at least one argument.
+  if (_UICallback)
+    _UICallback(nullptr, nullptr, nullptr, nullptr);
+  bHandled = TRUE;
   return 0;
 }
 

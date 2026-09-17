@@ -49,6 +49,8 @@ class UI {
   void ShowWithTimeout(size_t millisec);
   bool IsCountingDown() const;
   bool IsShown() const;
+  bool StartLmRefreshTimer(UINT initial_ms, UINT interval_ms, UINT attempts);
+  void StopLmRefreshTimer();
 
   // 重绘界面
   void Refresh();
