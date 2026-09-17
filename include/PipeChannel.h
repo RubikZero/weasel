@@ -134,7 +134,10 @@ class PipeChannel : public PipeChannelBase {
 
   char* SendBuffer() const { return _GetContext()->buffer.get() + _MsgSize; }
 
-  char* ReceiveBuffer() const { return _GetContext()->buffer.get() + _ResSize; }
+  // _Receive() reads the fixed header separately and then stores the message
+  // body at the beginning of the thread-local buffer.  This applies to both
+  // request bodies on the server and response bodies on the client.
+  char* ReceiveBuffer() const { return _GetContext()->buffer.get(); }
 
   template <typename _TyHandler>
   bool HandleResponseData(_TyHandler const& handler) {
