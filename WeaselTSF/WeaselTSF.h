@@ -226,6 +226,7 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   // IPC has no server-to-client push channel, so keep a short, UI-thread timer
   // while composing to retrieve the refreshed candidate snapshot.
   UINT_PTR _lm_refresh_timer = 0;
+  HWND _lm_refresh_timer_window = nullptr;
   unsigned int _lm_refresh_attempts = 0;
   bool _lm_refresh_first_tick = false;
   bool _lm_refresh_enabled = false;

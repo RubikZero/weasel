@@ -28,8 +28,18 @@ void WeaselTSF::_ScheduleLmRefresh() {
   if (_lm_refresh_timer)
     return;
 
-  const UINT_PTR timer_id =
-      ::SetTimer(nullptr, 0, initial_ms, &_LmRefreshTimerProc);
+  _lm_refresh_timer_window = _GetFocusedContextWindow();
+  const UINT_PTR requested_id = reinterpret_cast<UINT_PTR>(this);
+  UINT_PTR timer_id = ::SetTimer(_lm_refresh_timer_window, requested_id,
+                                 initial_ms, &_LmRefreshTimerProc);
+  // Some TSF hosts do not dispatch a thread-only (null-window) timer.  Binding
+  // to the focused editor window makes the callback follow the application's
+  // normal UI message loop.
+  if (!timer_id && _lm_refresh_timer_window) {
+    _lm_refresh_timer_window = nullptr;
+    timer_id =
+        ::SetTimer(nullptr, requested_id, initial_ms, &_LmRefreshTimerProc);
+  }
   if (!timer_id)
     return;
   {
@@ -43,12 +53,13 @@ void WeaselTSF::_ScheduleLmRefresh() {
 void WeaselTSF::_CancelLmRefresh() {
   if (!_lm_refresh_timer)
     return;
-  ::KillTimer(nullptr, _lm_refresh_timer);
+  ::KillTimer(_lm_refresh_timer_window, _lm_refresh_timer);
   {
     std::lock_guard<std::mutex> lock(g_lm_refresh_timers_mutex);
     g_lm_refresh_timers.erase(_lm_refresh_timer);
   }
   _lm_refresh_timer = 0;
+  _lm_refresh_timer_window = nullptr;
   _lm_refresh_attempts = 0;
   _lm_refresh_first_tick = false;
 }
@@ -62,9 +73,9 @@ void WeaselTSF::_PollLmRefresh() {
 
   if (_lm_refresh_first_tick) {
     _lm_refresh_first_tick = false;
-    const UINT_PTR timer_id = ::SetTimer(nullptr, _lm_refresh_timer,
-                                         _lm_refresh_interval_ms,
-                                         &_LmRefreshTimerProc);
+    const UINT_PTR timer_id =
+        ::SetTimer(_lm_refresh_timer_window, _lm_refresh_timer,
+                   _lm_refresh_interval_ms, &_LmRefreshTimerProc);
     if (!timer_id) {
       _CancelLmRefresh();
       return;
