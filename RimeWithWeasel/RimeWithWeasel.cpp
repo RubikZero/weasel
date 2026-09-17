@@ -429,14 +429,19 @@ void RimeWithWeaselHandler::OnNotify(void* context_object,
     // live sessions on the serialized server thread; only the session whose
     // input matches the cached LM result changes its candidate menu.
     if (self->m_post_to_server_thread) {
+      LOG(INFO) << "lm_ranker: Weasel received async refresh notification.";
       self->m_post_to_server_thread([self]() {
+        size_t refreshed = 0;
         if (RIME_API_AVAILABLE(rime_api, refresh_non_confirmed_composition)) {
           for (const auto& entry : self->m_session_status_map) {
             RimeSessionId session_id = self->to_session_id(entry.first);
-            if (session_id)
-              rime_api->refresh_non_confirmed_composition(session_id);
+            if (session_id &&
+                rime_api->refresh_non_confirmed_composition(session_id))
+              ++refreshed;
           }
         }
+        LOG(INFO) << "lm_ranker: Weasel refreshed " << refreshed
+                  << " non-confirmed composition(s).";
         if (self->m_active_session)
           self->_UpdateUI(self->m_active_session);
       });
