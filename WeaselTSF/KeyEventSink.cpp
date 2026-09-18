@@ -38,7 +38,20 @@ void WeaselTSF::_PollLmRefresh() {
   }
   // A zero keycode is already used by the TSF focus path to request a current
   // Rime response.  It has no editing effect, unlike synthesizing a real key.
-  m_client.ProcessKeyEvent(0);
+  bool transaction_failed = false;
+  m_client.ProcessKeyEventChecked(0, &transaction_failed);
+  if (transaction_failed) {
+    // The server did not answer within the transaction budget.  Polling again
+    // cannot help: cancel the chain (the next real key re-arms it) and stop
+    // stacking doomed transactions, each of which blocks this UI thread.
+    if (++_ipc_failure_streak >= kStalledTransactionLimit) {
+      _RecoverStalledSession();
+    } else {
+      _CancelLmRefresh();
+    }
+    return;
+  }
+  _ipc_failure_streak = 0;
   _UpdateComposition(_pEditSessionContext);
 }
 
@@ -71,7 +84,20 @@ void WeaselTSF::_ProcessKeyEvent(WPARAM wParam, LPARAM lParam, BOOL* pfEaten) {
     }
     if (!keyCountToSimulate) {
       _CancelLmRefresh();
-      *pfEaten = (BOOL)m_client.ProcessKeyEvent(ke);
+      bool transaction_failed = false;
+      *pfEaten =
+          (BOOL)m_client.ProcessKeyEventChecked(ke, &transaction_failed);
+      if (transaction_failed) {
+        // The answer never arrived, so this keystroke was lost and the
+        // composition on screen no longer reflects the server.  Reset once the
+        // failures look persistent instead of continuing to send keys into a
+        // server that is not answering.
+        if (++_ipc_failure_streak >= kStalledTransactionLimit) {
+          _RecoverStalledSession();
+        }
+      } else {
+        _ipc_failure_streak = 0;
+      }
     }
 
     if (ke.keycode == ibus::Caps_Lock) {

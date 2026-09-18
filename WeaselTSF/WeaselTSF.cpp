@@ -1,4 +1,4 @@
-﻿#include "stdafx.h"
+#include "stdafx.h"
 
 #include <WeaselIPCData.h>
 #include <thread>
@@ -238,7 +238,36 @@ void WeaselTSF::_Reconnect() {
 
 static unsigned int retry = 0;
 
+void WeaselTSF::_RecoverStalledSession() {
+  // The server stopped answering: everything the client knows about the
+  // composition is unverifiable, and a key sent now would either be lost or
+  // create a composition the window never shows.  Reset locally -- this is what
+  // the user achieved by switching the input method away and back -- and let the
+  // next key reconnect and start a fresh session.
+  //
+  // Deliberately no IPC here: ClearComposition()/EndSession() would block on the
+  // very server that is not answering.
+  _CancelLmRefresh();
+  _ipc_failure_streak = 0;
+  _status.composing = false;
+  if (_IsComposing() && _pEditSessionContext) {
+    _EndComposition(_pEditSessionContext, true);
+  }
+  _committed = TRUE;
+  if (_cand)
+    _cand->Destroy();
+  m_client.DiscardConnection();
+}
+
 bool WeaselTSF::_EnsureServerConnected() {
+  // Back off after a failed attempt: each one costs up to several transaction
+  // timeouts (Echo, EndSession, Connect, StartSession) and all of them block
+  // this thread, so retrying once per keystroke is what makes the whole window
+  // feel dead while the server is stalled.
+  const ULONGLONG now = GetTickCount64();
+  if (_server_retry_cooldown_until > now) {
+    return false;
+  }
   if (!m_client.Echo()) {
     _Reconnect();
     retry++;
@@ -277,8 +306,20 @@ bool WeaselTSF::_EnsureServerConnected() {
       }
       retry = 0;
     }
-    return (m_client.Echo() != 0);
+    if (m_client.Echo()) {
+      _ipc_failure_streak = 0;
+      return true;
+    }
+    // Still unreachable: cool down before blocking this thread again, and once
+    // the failures look persistent reset the local session so the window cannot
+    // stay wedged behind a composition the server no longer knows about.
+    _server_retry_cooldown_until = now + kServerRetryCooldownMs;
+    if (++_ipc_failure_streak >= kStalledTransactionLimit) {
+      _RecoverStalledSession();
+    }
+    return false;
   } else {
+    _ipc_failure_streak = 0;
     return true;
   }
 }

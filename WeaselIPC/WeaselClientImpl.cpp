@@ -1,4 +1,4 @@
-﻿#include "stdafx.h"
+#include "stdafx.h"
 #include "WeaselClientImpl.h"
 #include <StringAlgorithm.hpp>
 
@@ -51,6 +51,13 @@ void ClientImpl::Disconnect() {
   channel.Disconnect();
 }
 
+void ClientImpl::DiscardConnection() {
+  // No EndSession() here on purpose: it is a pipe transaction, and the whole
+  // point of dropping the connection is that the server may not be answering.
+  channel.Disconnect();
+  session_id = 0;
+}
+
 void ClientImpl::ShutdownServer() {
   _SendMessage(WEASEL_IPC_SHUTDOWN_SERVER, 0, 0);
 }
@@ -61,6 +68,22 @@ bool ClientImpl::ProcessKeyEvent(KeyEvent const& keyEvent) {
 
   LRESULT ret =
       _SendMessage(WEASEL_IPC_PROCESS_KEY_EVENT, keyEvent, session_id);
+  return ret != 0;
+}
+
+bool ClientImpl::ProcessKeyEventChecked(KeyEvent const& keyEvent,
+                                        bool* transaction_failed) {
+  if (!_Active()) {
+    if (transaction_failed)
+      *transaction_failed = true;
+    return false;
+  }
+
+  bool ok = false;
+  LRESULT ret =
+      _SendMessage(WEASEL_IPC_PROCESS_KEY_EVENT, keyEvent, session_id, &ok);
+  if (transaction_failed)
+    *transaction_failed = !ok;
   return ret != 0;
 }
 
@@ -200,11 +223,18 @@ bool ClientImpl::_WriteClientInfo() {
 
 LRESULT ClientImpl::_SendMessage(WEASEL_IPC_COMMAND Msg,
                                  DWORD wParam,
-                                 DWORD lParam) {
+                                 DWORD lParam,
+                                 bool* transaction_ok) {
+  if (transaction_ok)
+    *transaction_ok = false;
   try {
     PipeMessage req{Msg, wParam, lParam};
-    return channel.Transact(req);
+    const LRESULT result = channel.Transact(req);
+    if (transaction_ok)
+      *transaction_ok = true;
+    return result;
   } catch (DWORD /* ex */) {
+    // Timeout or dropped connection: the request may never have been answered.
     return 0;
   }
 }
@@ -224,12 +254,21 @@ void Client::Disconnect() {
   m_pImpl->Disconnect();
 }
 
+void Client::DiscardConnection() {
+  m_pImpl->DiscardConnection();
+}
+
 void Client::ShutdownServer() {
   m_pImpl->ShutdownServer();
 }
 
 bool Client::ProcessKeyEvent(KeyEvent const& keyEvent) {
   return m_pImpl->ProcessKeyEvent(keyEvent);
+}
+
+bool Client::ProcessKeyEventChecked(KeyEvent const& keyEvent,
+                                    bool* transaction_failed) {
+  return m_pImpl->ProcessKeyEventChecked(keyEvent, transaction_failed);
 }
 
 bool Client::CommitComposition() {

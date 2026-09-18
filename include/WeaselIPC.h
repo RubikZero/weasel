@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <WeaselIPCData.h>
 #include <WeaselUtility.h>
 #include <windows.h>
@@ -137,6 +137,16 @@ class Client {
   bool Echo();
   // 请求服务处理按键消息
   bool ProcessKeyEvent(KeyEvent const& keyEvent);
+  // Like ProcessKeyEvent(), but also reports whether the IPC transaction itself
+  // failed (server stalled / connection dropped).  "The server did not handle
+  // the key" and "the server never answered" need different reactions: the
+  // first is normal (e.g. an empty key code), the second means the local
+  // composition state can no longer be trusted.
+  bool ProcessKeyEventChecked(KeyEvent const& keyEvent,
+                              bool* transaction_failed);
+  // Drop the local connection without talking to a (possibly stalled) server.
+  // The next request reconnects and starts a fresh session.
+  void DiscardConnection();
   // 上屏正在編輯的文字
   bool CommitComposition();
   // 清除正在編輯的文字

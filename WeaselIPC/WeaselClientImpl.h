@@ -11,6 +11,7 @@ class ClientImpl {
 
   bool Connect(ServerLauncher const& launcher);
   void Disconnect();
+  void DiscardConnection();
   void ShutdownServer();
   void StartSession();
   void EndSession();
@@ -18,6 +19,7 @@ class ClientImpl {
   void EndMaintenance();
   bool Echo();
   bool ProcessKeyEvent(KeyEvent const& keyEvent);
+  bool ProcessKeyEventChecked(KeyEvent const& keyEvent, bool* transaction_failed);
   bool CommitComposition();
   bool ClearComposition();
   bool SelectCandidateOnCurrentPage(size_t index);
@@ -34,7 +36,13 @@ class ClientImpl {
   void _InitializeClientInfo();
   bool _WriteClientInfo();
 
-  LRESULT _SendMessage(WEASEL_IPC_COMMAND Msg, DWORD wParam, DWORD lParam);
+  // `transaction_ok`, when given, receives false if the request could not be
+  // delivered/answered (timeout, dropped connection) as opposed to the server
+  // answering with a value.
+  LRESULT _SendMessage(WEASEL_IPC_COMMAND Msg,
+                       DWORD wParam,
+                       DWORD lParam,
+                       bool* transaction_ok = nullptr);
 
   bool _Connected() const { return channel.Connected(); }
   bool _Active() const { return channel.Connected() && session_id != 0; }

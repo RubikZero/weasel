@@ -227,6 +227,20 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   UINT _lm_refresh_interval_ms = 120;
   UINT _lm_refresh_timeout_ms = 1500;
 
+  // Defences against a server that stops answering.  Every pipe transaction
+  // blocks this (UI) thread until its deadline, so one unreachable server could
+  // otherwise freeze the window for seconds per keystroke while the composition
+  // on screen kept drifting away from the server's state.
+  // Consecutive unanswered transactions before the local state is reset.
+  static const int kStalledTransactionLimit = 3;
+  // Minimum time between connection attempts while the server is unreachable.
+  static const ULONGLONG kServerRetryCooldownMs = 1000;
+  int _ipc_failure_streak = 0;
+  ULONGLONG _server_retry_cooldown_until = 0;
+  // Drop the local composition/session without talking to the server; the
+  // equivalent of switching the input method away and back.
+  void _RecoverStalledSession();
+
   /* cursor context (surrounding text before the caret) */
   std::wstring _surrounding_text;
   std::wstring _surrounding_text_last_sent;

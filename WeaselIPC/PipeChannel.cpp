@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 
+#include <ApiLock.h>
 #include <PipeChannel.h>
 
 using namespace weasel;
@@ -16,6 +17,39 @@ using namespace boost;
     if ((err = ::GetLastError()) != __c) \
       throw err;                         \
   }
+
+namespace {
+
+// Attribution for "the input method stopped responding": every IPC wait runs on
+// the host application's UI thread, so knowing which stage consumed the time
+// (connect / write / read) is the difference between a guess and a diagnosis.
+// Set RIME_WEASEL_IPC_TRACE=1 to report slow stages to the watchdog log.
+bool IpcTraceEnabled() {
+  static const bool enabled = []() {
+#pragma warning(suppress : 4996)
+    return std::getenv("RIME_WEASEL_IPC_TRACE") != nullptr;
+  }();
+  return enabled;
+}
+
+struct StageTimer {
+  const char* stage;
+  unsigned long long start_ms;
+  explicit StageTimer(const char* name) : stage(name), start_ms(NowMs()) {}
+  ~StageTimer() {
+    if (!IpcTraceEnabled())
+      return;
+    const unsigned long long elapsed = NowMs() - start_ms;
+    if (elapsed < 50)
+      return;
+    char line[256];
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "ipc: %s took %llu ms", stage,
+                elapsed);
+    WatchdogLog(line);
+  }
+};
+
+}  // namespace
 
 PipeChannelBase::PipeChannelBase(std::wstring&& pn_cmd,
                                  size_t bs = 4 * 1024,
@@ -36,20 +70,26 @@ DWORD weasel::IpcReadTimeoutMs() {
 }
 
 bool PipeChannelBase::_WaitReadable(HANDLE pipe, DWORD timeout_ms) const {
+  StageTimer timer("read-wait");
   // ReadFile() on a message-mode pipe blocks until a whole message arrives.
   // Poll first so the wait can be bounded and the UI thread stays responsive.
-  const DWORD kStepMs = 2;
-  DWORD waited = 0;
+  //
+  // The budget must be measured in wall-clock time: PeekNamedPipe() is cheap but
+  // not free (~10ms per call against a stalled peer), and counting only the
+  // sleeps in between made the "bounded" wait overshoot by an order of
+  // magnitude (measured: 7.8s for a 1s budget, ~23s for the default 3s).  That
+  // overshoot is precisely the unresponsive typing this deadline exists to
+  // prevent.
+  const ULONGLONG deadline = ::GetTickCount64() + timeout_ms;
   for (;;) {
     DWORD available = 0;
     if (!::PeekNamedPipe(pipe, NULL, 0, NULL, &available, NULL))
       return false;  // server gone / connection closed
     if (available > 0)
       return true;
-    if (waited >= timeout_ms)
+    if (::GetTickCount64() >= deadline)
       return false;
-    ::Sleep(kStepMs);
-    waited += kStepMs;
+    ::Sleep(2);
   }
 }
 
@@ -72,6 +112,7 @@ bool PipeChannelBase::_Ensure() {
 }
 
 HANDLE PipeChannelBase::_Connect(const wchar_t* name) {
+  StageTimer timer("connect");
   HANDLE pipe = INVALID_HANDLE_VALUE;
   // Connecting can block forever when every server pipe instance is busy --
   // which is exactly what a stalled server looks like.  This call happens on
@@ -111,6 +152,7 @@ HANDLE PipeChannelBase::_TryConnect() {
 }
 
 size_t PipeChannelBase::_WritePipe(HANDLE pipe, size_t s, char* b) {
+  StageTimer timer("write");
   DWORD lwritten;
   if (!::WriteFile(pipe, b, s, &lwritten, NULL) || lwritten <= 0) {
     _ThrowLastError;
@@ -127,6 +169,7 @@ size_t PipeChannelBase::_WritePipe(HANDLE pipe, size_t s, char* b) {
 
 void PipeChannelBase::_FinalizePipe(HANDLE& p) {
   if (!_Invalid(p)) {
+    StageTimer timer("disconnect");
     DisconnectNamedPipe(p);
     CloseHandle(p);
   }
@@ -134,6 +177,7 @@ void PipeChannelBase::_FinalizePipe(HANDLE& p) {
 }
 
 void PipeChannelBase::_Receive(HANDLE pipe, LPVOID msg, size_t rec_len) {
+  StageTimer timer("read");
   DWORD lread;
   BOOL success = ::ReadFile(pipe, msg, rec_len, &lread, NULL);
   if (!success) {
