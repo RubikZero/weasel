@@ -118,8 +118,10 @@ Weasel 自己的 `LOG()` 宏在未定义 `WEASEL_ENABLE_LOGGING` 时是**空操�
 1. **IPC 写侧截止时间**：`WriteFile` 仍可能在对端"活着但不读"时阻塞（现在它发生在锁外，
    只影响该连接，因此优先级下降）；彻底解决需 `FILE_FLAG_OVERLAPPED` + `CancelIoEx`，
    会同时改动读写两侧，作为独立一轮更稳妥。
-2. 客户端 LM 轮询（每 120ms）与 `_ScheduleLmRefresh` 的"上一次未返回则跳过"（用户待办 2）。
-3. 字词重排也给最高概率候选标 `[LM]`（用户待办 1）。
+2. 客户端 LM 轮询（每 120ms）与 `_ScheduleLmRefresh` 的"上一次未返回则跳过"（用户待办 2）
+   —— **已完成**，见 `lm-top-mark-and-ipc-defense.md`（其中还修掉了 IPC 等待预算被放大
+   ~7.8 倍的真实缺陷：默认 3000ms 预算实际阻塞 23.4 秒）。
+3. 字词重排也给最高概率候选标 `[LM]`（用户待办 1）—— **已完成**，同上文档。
 4. 延迟优化 / 小型 causal Transformer 整句模型（用户待办 3）。
 5. 分析 09-17 14:44:36/40 的两个 `WeaselServer.exe` 转储。
 
