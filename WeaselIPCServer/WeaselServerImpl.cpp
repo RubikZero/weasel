@@ -1,5 +1,7 @@
 #include "stdafx.h"
 #include "WeaselServerImpl.h"
+#include <ApiLock.h>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -21,6 +23,13 @@ class PipeServer : public PipeChannel<DWORD, PipeMessage> {
   /* Get a server runner */
   ServerRunner GetServerRunner(ServerHandler const& handler);
 
+ protected:
+  // A response written to a connection handle cannot be retried on a fresh
+  // connection: the client-side reconnect path would connect to this server's
+  // own pipe, leak that instance and strand another worker thread in
+  // _Receive().  Let the failure close the connection instead.
+  bool _ReconnectOnSendFailure() const override { return false; }
+
  private:
   void _ProcessPipeThread(HANDLE pipe, ServerHandler const& handler);
 };
@@ -30,7 +39,82 @@ using namespace weasel;
 
 extern CAppModule _Module;
 
-static std::mutex g_api_mutex;
+// Server-side timing policy.  Every wait in the request path is bounded: an
+// unbounded wait on a shared lock is what turned one stalled window operation
+// into "no input on the whole machine until the server process is killed".
+//
+// - kWorkerLockBudgetMs: how long a pipe worker waits for the api lock.  Kept
+//   below the client's own transaction budget (IpcReadTimeoutMs) so the client
+//   receives an answer (0 = not handled) instead of timing out.
+// - kApiLockWarnMs: a hold this long is reported once by the watchdog.
+// - kRimeTaskBudgetMs: total budget for deferred librime work (language-model
+//   notifications) before it is dropped instead of queueing forever.
+static const DWORD kApiLockWarnMs = 5000;
+static const DWORD kRimeTaskBudgetMs = 5000;
+static const UINT kWatchdogIntervalMs = 500;
+static const UINT_PTR kWatchdogTimerId = 0x57534150;  // 'WSAP'
+static const size_t kMaxDeferredRimeTasks = 8;
+
+// Threshold for the "api lock held too long" warning, overridable for
+// diagnostics with RIME_WEASEL_LOCK_WARN_MS (50..600000).
+static DWORD ApiLockWarnMs() {
+  static const DWORD value = []() -> DWORD {
+#pragma warning(suppress : 4996)
+    if (const char* env = std::getenv("RIME_WEASEL_LOCK_WARN_MS")) {
+      const int parsed = std::atoi(env);
+      if (parsed >= 50 && parsed <= 600000)
+        return static_cast<DWORD>(parsed);
+    }
+    return kApiLockWarnMs;
+  }();
+  return value;
+}
+
+static DWORD WorkerLockBudgetMs() {
+  const DWORD budget = IpcReadTimeoutMs();
+  return budget > 500 ? budget - 200 : budget;
+}
+
+static const char* IpcCommandName(WEASEL_IPC_COMMAND command) {
+  switch (command) {
+    case WEASEL_IPC_ECHO:
+      return "echo";
+    case WEASEL_IPC_START_SESSION:
+      return "start_session";
+    case WEASEL_IPC_END_SESSION:
+      return "end_session";
+    case WEASEL_IPC_PROCESS_KEY_EVENT:
+      return "process_key_event";
+    case WEASEL_IPC_SHUTDOWN_SERVER:
+      return "shutdown_server";
+    case WEASEL_IPC_FOCUS_IN:
+      return "focus_in";
+    case WEASEL_IPC_FOCUS_OUT:
+      return "focus_out";
+    case WEASEL_IPC_UPDATE_INPUT_POS:
+      return "update_input_pos";
+    case WEASEL_IPC_START_MAINTENANCE:
+      return "start_maintenance";
+    case WEASEL_IPC_END_MAINTENANCE:
+      return "end_maintenance";
+    case WEASEL_IPC_COMMIT_COMPOSITION:
+      return "commit_composition";
+    case WEASEL_IPC_CLEAR_COMPOSITION:
+      return "clear_composition";
+    case WEASEL_IPC_TRAY_COMMAND:
+      return "tray_command";
+    case WEASEL_IPC_SELECT_CANDIDATE_ON_CURRENT_PAGE:
+      return "select_candidate";
+    case WEASEL_IPC_HIGHLIGHT_CANDIDATE_ON_CURRENT_PAGE:
+      return "highlight_candidate";
+    case WEASEL_IPC_CHANGE_PAGE:
+      return "change_page";
+    case WEASEL_IPC_SET_CONTEXT:
+      return "set_context";
+    default:
+      return "unknown";
+  }
+}
 
 ServerImpl::ServerImpl()
     : m_pRequestHandler(NULL),
@@ -44,6 +128,11 @@ ServerImpl::~ServerImpl() {
 }
 
 void ServerImpl::_Finailize() {
+  m_stop_watchdog.store(true);
+  if (watchdogThread != nullptr) {
+    watchdogThread->interrupt();
+    watchdogThread = nullptr;
+  }
   if (pipeThread != nullptr) {
     pipeThread->interrupt();
     pipeThread = nullptr;
@@ -63,7 +152,16 @@ LRESULT ServerImpl::OnColorChange(UINT uMsg,
                                   BOOL& bHandled) {
   if (IsUserDarkMode() != m_darkMode) {
     m_darkMode = IsUserDarkMode();
-    m_pRequestHandler->UpdateColorTheme(m_darkMode);
+    if (m_pRequestHandler) {
+      // Runs on the message thread: the lock must always be taken with a
+      // deadline here, so a long request can never stop this thread from
+      // pumping messages (and with it the candidate window and the tray).
+      ApiLockGuard guard("color_theme", WorkerLockBudgetMs());
+      if (guard)
+        m_pRequestHandler->UpdateColorTheme(m_darkMode);
+      else
+        WatchdogLog("color theme update skipped: api lock busy");
+    }
   }
   return 0;
 }
@@ -74,6 +172,9 @@ LRESULT ServerImpl::OnCreate(UINT uMsg,
                              BOOL& bHandled) {
   // not neccessary...
   ::SetWindowText(m_hWnd, WEASEL_IPC_WINDOW);
+  // Watchdog: reports a lock held far too long, retries deferred librime work
+  // and lets the handler self-heal state that disables input.
+  SetTimer(kWatchdogTimerId, kWatchdogIntervalMs);
   return 0;
 }
 
@@ -81,6 +182,7 @@ LRESULT ServerImpl::OnClose(UINT uMsg,
                             WPARAM wParam,
                             LPARAM lParam,
                             BOOL& bHandled) {
+  KillTimer(kWatchdogTimerId);
   Stop();
   return 0;
 }
@@ -116,12 +218,23 @@ LRESULT ServerImpl::OnCommand(UINT uMsg,
                               LPARAM lParam,
                               BOOL& bHandled) {
   UINT uID = LOWORD(wParam);
+  // Tray menu commands arrive on the message thread; SetOption touches librime
+  // and the candidate window, so it needs the same bounded lock as requests.
+  const auto set_ascii_mode = [this](bool ascii) {
+    if (!m_pRequestHandler)
+      return;
+    ApiLockGuard guard("tray_ascii_mode", WorkerLockBudgetMs());
+    if (guard)
+      m_pRequestHandler->SetOption(0, "ascii_mode", ascii);
+    else
+      WatchdogLog("tray ascii_mode skipped: api lock busy");
+  };
   switch (uID) {
     case ID_WEASELTRAY_ENABLE_ASCII:
-      m_pRequestHandler->SetOption(lParam, "ascii_mode", true);
+      set_ascii_mode(true);
       return 0;
     case ID_WEASELTRAY_DISABLE_ASCII:
-      m_pRequestHandler->SetOption(lParam, "ascii_mode", false);
+      set_ascii_mode(false);
       return 0;
     default:;
   }
@@ -160,6 +273,39 @@ LRESULT ServerImpl::OnPostCallbackMessage(UINT uMsg,
   return 0;
 }
 
+LRESULT ServerImpl::OnTimerMessage(UINT uMsg,
+                                   WPARAM wParam,
+                                   LPARAM lParam,
+                                   BOOL& bHandled) {
+  if (wParam != kWatchdogTimerId) {
+    bHandled = FALSE;
+    return 0;
+  }
+  static bool announced = false;
+  if (!announced) {
+    announced = true;
+#pragma warning(suppress : 4996)
+    if (std::getenv("RIME_WEASEL_WATCHDOG_VERBOSE")) {
+      char line[160];
+      _snprintf_s(line, sizeof(line), _TRUNCATE,
+                  "server watchdog active (lock hold warning threshold %u ms)",
+                  ApiLockWarnMs());
+      WatchdogLog(line);
+    }
+  }
+  // The lock-hold watchdog runs on its own thread (see Run()): a window timer
+  // cannot see a hold by this thread.
+  // Deferred librime work is retried here, on the message thread, instead of
+  // blocking the message loop on the api lock.
+  _DrainDeferredRimeTasks();
+  if (m_pRequestHandler) {
+    // Never called with the api lock held: the handler may start background
+    // work, but nothing in here may stop this thread from pumping messages.
+    m_pRequestHandler->OnMaintenanceWatchdog();
+  }
+  return 0;
+}
+
 void ServerImpl::Post(std::function<void()> fn) {
   if (m_hWnd == NULL)
     return;
@@ -173,11 +319,72 @@ void ServerImpl::Post(std::function<void()> fn) {
 }
 
 void ServerImpl::PostRime(std::function<void()> fn) {
-  Post([fn = std::move(fn)]() mutable {
-    std::lock_guard<std::mutex> lock(g_api_mutex);
-    if (fn)
-      fn();
-  });
+  if (!fn)
+    return;
+  const unsigned long long deadline = NowMs() + kRimeTaskBudgetMs;
+  {
+    std::lock_guard<std::mutex> lock(m_deferred_mutex);
+    if (m_deferred_rime_tasks.size() >= kMaxDeferredRimeTasks) {
+      WatchdogLog("dropping deferred rime task: queue full");
+      return;
+    }
+    DeferredRimeTask task;
+    task.fn = std::move(fn);
+    task.deadline = deadline;
+    m_deferred_rime_tasks.push_back(std::move(task));
+  }
+  Post([this]() { _DrainDeferredRimeTasks(); });
+}
+
+void ServerImpl::_DrainDeferredRimeTasks() {
+  std::vector<DeferredRimeTask> pending;
+  {
+    std::lock_guard<std::mutex> lock(m_deferred_mutex);
+    pending.swap(m_deferred_rime_tasks);
+  }
+  if (pending.empty())
+    return;
+
+  std::vector<DeferredRimeTask> retry;
+  for (auto& task : pending) {
+    // try_lock only: this runs inside the message loop, so waiting for the api
+    // lock here is exactly the pattern that used to strand every session.
+    ApiLockGuard guard("deferred_rime", 0);
+    if (guard) {
+      if (task.fn)
+        task.fn();
+      continue;
+    }
+    if (NowMs() < task.deadline) {
+      retry.push_back(std::move(task));
+      continue;
+    }
+    const auto snapshot = ApiLock::instance().Inspect();
+    char line[512];
+    _snprintf_s(line, sizeof(line), _TRUNCATE,
+                "dropping deferred rime task after %u ms: api lock held by '%s' for %llu ms",
+                kRimeTaskBudgetMs, snapshot.op, snapshot.held_ms);
+    WatchdogLog(line);
+  }
+
+  if (!retry.empty()) {
+    std::lock_guard<std::mutex> lock(m_deferred_mutex);
+    for (auto& task : retry)
+      m_deferred_rime_tasks.push_back(std::move(task));
+  }
+}
+
+void ServerImpl::_CheckApiLockWatchdog() {
+  const auto snapshot = ApiLock::instance().Inspect();
+  if (!snapshot.locked || snapshot.held_ms < ApiLockWarnMs() ||
+      snapshot.warning_reported)
+    return;
+  ApiLock::instance().MarkWarningReported();
+  char line[512];
+  _snprintf_s(line, sizeof(line), _TRUNCATE,
+              "api lock held for %llu ms by '%s'", snapshot.held_ms,
+              snapshot.op);
+  WatchdogLog(line);
 }
 
 DWORD ServerImpl::OnCommand(WEASEL_IPC_COMMAND uMsg,
@@ -235,15 +442,58 @@ int ServerImpl::Run() {
       // Compute the reply while holding the lock (librime is not thread safe),
       // but hand it to the pipe only after releasing it: sending a response can
       // block until the client reads it, and a stalled client must never hold
-      // the global API mutex -- that used to freeze every other session (and
+      // the global API lock -- that used to freeze every other session (and
       // explorer.exe with it) until the machine was power cycled.
-      std::lock_guard guard(g_api_mutex);
-      HandlePipeMessage(msg, [&result](DWORD value) { result = value; });
+      //
+      // The wait for the lock is bounded, because a worker that waits forever
+      // is a worker whose client can never be answered.  Note what must NOT
+      // happen in this region: touching a window.  The candidate window is
+      // owned by the server message thread, so a cross-thread window call here
+      // would wait for that thread while holding the lock -- and the message
+      // thread takes the same lock for deferred language-model work
+      // (PostRime -> _DrainDeferredRimeTasks).  That cycle is a permanent
+      // deadlock no client timeout can break, so all window work is posted to
+      // the message thread instead (see RimeWithWeaselHandler::_UpdateUI).
+      ApiLockGuard guard(IpcCommandName(msg.Msg), WorkerLockBudgetMs());
+      if (guard) {
+        HandlePipeMessage(msg, [&result](DWORD value) { result = value; });
+      } else {
+        const auto snapshot = ApiLock::instance().Inspect();
+        char line[512];
+        _snprintf_s(line, sizeof(line), _TRUNCATE,
+                    "api lock timeout while handling %s (held by '%s' for %llu ms); replying 0",
+                    IpcCommandName(msg.Msg), snapshot.op, snapshot.held_ms);
+        WatchdogLog(line);
+      }
     }
     resp(result);
   };
   pipeThread = std::make_unique<boost::thread>(
       [this, &listener]() { channel->Listen(listener); });
+
+  // Lock-hold watchdog.  Runs off the message thread on purpose: a hold by the
+  // message thread itself (deferred language-model work, candidate-window
+  // refresh) is invisible to a window timer, and that is the hold that makes
+  // every session look dead.  Reports once per hold, then keeps watching.
+  watchdogThread = std::make_unique<boost::thread>([this]() {
+#pragma warning(suppress : 4996)
+    if (std::getenv("RIME_WEASEL_WATCHDOG_VERBOSE")) {
+      char line[160];
+      _snprintf_s(line, sizeof(line), _TRUNCATE,
+                  "lock-hold watchdog thread started (threshold %u ms)",
+                  ApiLockWarnMs());
+      WatchdogLog(line);
+    }
+    while (!m_stop_watchdog.load()) {
+      _CheckApiLockWatchdog();
+      try {
+        boost::this_thread::sleep_for(boost::chrono::milliseconds(
+            static_cast<long>(kWatchdogIntervalMs)));
+      } catch (const boost::thread_interrupted&) {
+        return;
+      }
+    }
+  });
 
   CMessageLoop theLoop;
   _Module.AddMessageLoop(&theLoop);

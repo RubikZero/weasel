@@ -1,4 +1,4 @@
-﻿// WeaselServer.cpp : main source file for WeaselServer.exe
+// WeaselServer.cpp : main source file for WeaselServer.exe
 //
 //	WTL MessageLoop 封装了消息循环. 实现了 getmessage/dispatchmessage....
 
@@ -86,6 +86,15 @@ int WINAPI _tWinMain(HINSTANCE hInstance,
 
   // command line option /q stops the running server
   bool quit = !wcscmp(L"/q", lpstrCmdLine) || !wcscmp(L"/quit", lpstrCmdLine);
+  // Ask the running server to quit through its window.  The message thread
+  // handles WM_CLOSE without the pipe and without the api lock, so this still
+  // works when a stuck request would make every pipe transaction time out --
+  // the case where the user previously had to kill the process by hand.
+  if (quit) {
+    HWND server_wnd = ::FindWindowW(WEASEL_IPC_WINDOW, WEASEL_IPC_WINDOW);
+    if (server_wnd && ::PostMessageW(server_wnd, WM_CLOSE, 0, 0))
+      return 0;
+  }
   // restart if already running
   {
     weasel::Client client;

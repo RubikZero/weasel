@@ -91,6 +91,11 @@ struct RequestHandler {
   virtual void EndMaintenance() {}
   virtual void SetOption(DWORD session_id, const std::string& opt, bool val) {}
   virtual void UpdateColorTheme(BOOL darkMode) {}
+  // Called periodically on the server message thread (never while holding the
+  // api lock) so the handler can self-heal state that would otherwise disable
+  // input forever, e.g. a maintenance cycle whose completion was never
+  // delivered.
+  virtual void OnMaintenanceWatchdog() {}
 };
 
 // 處理server端回應之物件

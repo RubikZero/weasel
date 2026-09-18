@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include <logging.h>
+#include <ApiLock.h>
 #include <RimeWithWeasel.h>
 #include <StringAlgorithm.hpp>
 #include <WeaselConstants.h>
@@ -8,9 +9,11 @@
 #include <filesystem>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <fstream>
 #include <map>
 #include <array>
+#include <thread>
 #include <vector>
 #include <regex>
 #include <rime_api.h>
@@ -27,6 +30,19 @@ typedef enum { COLOR_ABGR = 0, COLOR_ARGB, COLOR_RGBA } ColorFormat;
 using namespace weasel;
 
 static RimeApi* rime_api;
+
+// Window work runs on the server message thread and needs the api lock only to
+// read librime state; the wait is bounded so a slow request can never stop the
+// message loop from pumping (which is what used to deadlock the whole server).
+static const DWORD kUiApplyLockMs = 3000;
+// Re-initializing after a maintenance cycle joins the deployment thread and can
+// take a while, so its budget is much larger -- but still bounded.
+static const DWORD kResumeLockMs = 120000;
+// How long the service may stay disabled without a deployer before the
+// watchdog resumes it: a missed "deployment finished" notification must not
+// leave the IME answering every key with FALSE forever.
+static const unsigned long long kDisabledResumeDelayMs = 5000;
+
 WeaselSessionId _GenerateNewWeaselSessionId(SessionStatusMap sm, DWORD pid) {
   if (sm.empty())
     return (WeaselSessionId)(pid + 1);
@@ -70,9 +86,7 @@ RimeWithWeaselHandler::~RimeWithWeaselHandler() {
   m_app_options.clear();
 }
 
-bool add_session = false;
-void _UpdateUIStyle(RimeConfig* config, UI* ui, bool initialize);
-bool _UpdateUIStyleColor(RimeConfig* config,
+void _UpdateUIStyle(RimeConfig* config, UI* ui, bool initialize);bool _UpdateUIStyleColor(RimeConfig* config,
                          UIStyle& style,
                          const std::string& color = std::string());
 void _LoadAppOptions(RimeConfig* config, AppOptionsByAppName& app_options);
@@ -112,6 +126,14 @@ void RimeWithWeaselHandler::_Setup() {
 }
 
 void RimeWithWeaselHandler::Initialize() {
+  // Recursive-safe: EndMaintenance() and AddSession() may already hold the api
+  // lock.  A background maintenance resume takes it with a bounded wait.
+  ApiLockGuard guard("initialize", kResumeLockMs);
+  if (!guard) {
+    WatchdogLog("RimeWithWeaselHandler::Initialize skipped: api lock busy");
+    return;
+  }
+
   m_disabled = _IsDeployerRunning();
   if (m_disabled) {
     return;
@@ -252,6 +274,14 @@ void RimeWithWeaselHandler::_LoadLmRefreshSettings() {
 }
 
 void RimeWithWeaselHandler::Finalize() {
+  // Reachable from the message thread (session end / server shutdown) and from
+  // a pipe request, so it must serialize with everything else -- bounded, so
+  // that a stuck request cannot stop the server from shutting down.
+  ApiLockGuard guard("finalize", kResumeLockMs);
+  if (!guard) {
+    WatchdogLog("RimeWithWeaselHandler::Finalize skipped: api lock busy");
+    return;
+  }
   m_active_session = 0;
   m_disabled = true;
   m_session_status_map.clear();
@@ -271,7 +301,11 @@ DWORD RimeWithWeaselHandler::FindSession(WeaselSessionId ipc_id) {
 DWORD RimeWithWeaselHandler::AddSession(LPWSTR buffer, EatLine eat) {
   if (m_disabled) {
     DLOG(INFO) << "Trying to resume service.";
-    EndMaintenance();
+    // Resume on a background thread: re-initializing librime joins the
+    // deployment thread and can take minutes.  Doing that here -- inside a pipe
+    // request, with the api lock held -- stalled every other session for the
+    // whole deployment and looked exactly like a hung input method.
+    _ResumeMaintenanceAsync();
     if (m_disabled)
       return 0;
   }
@@ -312,16 +346,13 @@ DWORD RimeWithWeaselHandler::AddSession(LPWSTR buffer, EatLine eat) {
   if (eat) {
     _Respond(ipc_id, eat);
   }
-  add_session = true;
-  _UpdateUI(ipc_id);
-  add_session = false;
+  _UpdateUI(ipc_id, /*add_session = */ true);
   m_active_session = ipc_id;
   return ipc_id;
 }
 
 DWORD RimeWithWeaselHandler::RemoveSession(WeaselSessionId ipc_id) {
-  if (m_ui)
-    m_ui->Hide();
+  _HideUI();
   if (m_disabled)
     return 0;
   DLOG(INFO) << "Remove session: session_id = " << to_session_id(ipc_id);
@@ -333,6 +364,14 @@ DWORD RimeWithWeaselHandler::RemoveSession(WeaselSessionId ipc_id) {
 }
 
 void RimeWithWeaselHandler::UpdateColorTheme(BOOL darkMode) {
+  // Runs on the message thread (WM_SETTINGCHANGE / colorization change).  The
+  // caller takes the api lock with a deadline; take it here too so the handler
+  // stays safe for any caller.
+  ApiLockGuard guard("color_theme", kUiApplyLockMs);
+  if (!guard) {
+    WatchdogLog("UpdateColorTheme skipped: api lock busy");
+    return;
+  }
   RimeConfig config = {NULL};
   if (rime_api->config_open("weasel", &config)) {
     if (m_ui) {
@@ -459,8 +498,7 @@ void RimeWithWeaselHandler::FocusIn(DWORD client_caps, WeaselSessionId ipc_id) {
 
 void RimeWithWeaselHandler::FocusOut(DWORD param, WeaselSessionId ipc_id) {
   DLOG(INFO) << "Focus out: ipc_id = " << ipc_id;
-  if (m_ui)
-    m_ui->Hide();
+  _HideUI();
   m_active_session = 0;
 }
 
@@ -469,12 +507,23 @@ void RimeWithWeaselHandler::UpdateInputPosition(RECT const& rc,
   DLOG(INFO) << "Update input position: (" << rc.left << ", " << rc.top
              << "), ipc_id = " << ipc_id
              << ", m_active_session = " << m_active_session;
+  if (_HasServerMessageLoop()) {
+    const RECT rc_copy = rc;
+    _PostUI([this, rc_copy, ipc_id]() { _ApplyInputPosition(rc_copy, ipc_id); });
+    return;
+  }
+  _ApplyInputPosition(rc, ipc_id);
+}
+
+void RimeWithWeaselHandler::_ApplyInputPosition(RECT const& rc,
+                                                WeaselSessionId ipc_id) {
+  // Server message thread: this is the only thread that may touch the panel.
   if (m_ui)
     m_ui->UpdateInputPosition(rc);
   if (m_disabled)
     return;
   if (m_active_session != ipc_id) {
-    _UpdateUI(ipc_id);
+    _ApplyUILocked(ipc_id, false);
     m_active_session = ipc_id;
   }
 }
@@ -530,16 +579,34 @@ void RimeWithWeaselHandler::OnNotify(void* context_object,
     // Do not capture m_active_session here: the notification originates from
     // an LM worker, while focus changes and pipe requests update that field on
     // the server thread.  Besides being a data race, an intervening focus-out
-    // made the old code refresh session 0, losing the result.  Recompose all
-    // live sessions on the serialized server thread; only the session whose
-    // input matches the cached LM result changes its candidate menu.
+    // made the old code refresh session 0, losing the result.  Recompose the
+    // sessions that are actually composing; only the session whose input
+    // matches the cached LM result changes its candidate menu.
+    //
+    // At most one refresh may be outstanding.  The deferred task re-reads the
+    // live composition, so queueing one task per decode only added api-lock
+    // pressure -- and every queued task is another chance for the message
+    // thread to sit waiting on that lock.
     if (self->m_post_to_server_thread) {
+      if (self->m_lm_refresh_posted.exchange(true))
+        return;
       self->m_post_to_server_thread([self]() {
+        self->m_lm_refresh_posted.store(false);
         size_t refreshed = 0;
         if (RIME_API_AVAILABLE(rime_api, refresh_non_confirmed_composition)) {
           for (const auto& entry : self->m_session_status_map) {
-            RimeSessionId session_id = self->to_session_id(entry.first);
-            if (session_id &&
+            const RimeSessionId session_id = entry.second.session_id;
+            if (!session_id)
+              continue;
+            // Only a session with an active composition can gain candidates
+            // from a refreshed decode.
+            RIME_STRUCT(RimeStatus, status);
+            bool composing = false;
+            if (rime_api->get_status(session_id, &status)) {
+              composing = !!status.is_composing;
+              rime_api->free_status(&status);
+            }
+            if (composing &&
                 rime_api->refresh_non_confirmed_composition(session_id))
               ++refreshed;
           }
@@ -650,11 +717,75 @@ void RimeWithWeaselHandler::StartMaintenance() {
 }
 
 void RimeWithWeaselHandler::EndMaintenance() {
+  // Answer the request first and resume in the background.  Initialize() may
+  // join a deployment thread (minutes); running that inside this request while
+  // holding the api lock used to stall every session on the machine and left
+  // the service disabled if the client gave up in the meantime.
   if (m_disabled) {
-    Initialize();
-    _UpdateUI(0);
+    _ResumeMaintenanceAsync();
+  } else {
+    m_session_status_map.clear();
   }
-  m_session_status_map.clear();
+}
+
+void RimeWithWeaselHandler::_ResumeMaintenanceAsync() {
+  if (!m_disabled)
+    return;
+  if (m_resume_in_flight.exchange(true))
+    return;  // an earlier resume is still running
+  // Bounded retry rate: while the service stays disabled (a real deployment
+  // holds WeaselDeployerMutex) this used to be none, but a key press must not
+  // spawn a thread per keystroke either.
+  const unsigned long long now = NowMs();
+  const unsigned long long last = m_last_resume_kick.load();
+  if (last != 0 && now - last < 2000) {
+    m_resume_in_flight.store(false);
+    return;
+  }
+  m_last_resume_kick.store(now);
+  std::thread([this]() {
+    ApiLockGuard guard("resume_maintenance", kResumeLockMs);
+    if (guard) {
+      if (m_disabled) {
+        LOG(INFO) << "resuming service after maintenance.";
+        Initialize();
+        m_session_status_map.clear();
+      }
+    } else {
+      WatchdogLog(
+          "background maintenance resume skipped: api lock busy for too long");
+    }
+    m_resume_in_flight.store(false);
+    // Refresh the candidate window/tray with the service state.
+    _PostUI([this]() { _ApplyUILocked(0, false); });
+  }).detach();
+}
+
+void RimeWithWeaselHandler::OnMaintenanceWatchdog() {
+  // Runs on the server message thread, roughly twice a second, and never with
+  // the api lock held.
+  if (!m_disabled) {
+    m_disabled_since = 0;
+    return;
+  }
+  const unsigned long long now = NowMs();
+  if (m_disabled_since == 0) {
+    m_disabled_since = now;
+    return;
+  }
+  if (now - m_disabled_since < kDisabledResumeDelayMs)
+    return;
+  if (m_resume_in_flight)
+    return;
+  // A deployer still running is legitimate: leave the service disabled.
+  if (_IsDeployerRunning())
+    return;
+  char line[256];
+  _snprintf_s(line, sizeof(line), _TRUNCATE,
+              "service disabled for %llu ms with no deployer running; resuming",
+              now - m_disabled_since);
+  WatchdogLog(line);
+  _ResumeMaintenanceAsync();
 }
 
 void RimeWithWeaselHandler::SetOption(WeaselSessionId ipc_id,
@@ -689,8 +820,65 @@ bool RimeWithWeaselHandler::_IsDeployerRunning() {
   return deployer_detected;
 }
 
-void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
-  // if m_ui nullptr, _UpdateUI meaningless
+bool RimeWithWeaselHandler::_HasServerMessageLoop() const {
+  // In the server the candidate window lives on the message thread; only there
+  // may it be shown, hidden or moved.  Without a registered poster (headless
+  // hosts, tests) fall back to running inline, which is the old behaviour.
+  return m_ui != nullptr && static_cast<bool>(m_post_ui_to_server_thread);
+}
+
+void RimeWithWeaselHandler::_PostUI(std::function<void()> fn) {
+  if (!fn)
+    return;
+  if (m_post_ui_to_server_thread) {
+    m_post_ui_to_server_thread(std::move(fn));
+    return;
+  }
+  fn();
+}
+
+void RimeWithWeaselHandler::_HideUI() {
+  if (!m_ui)
+    return;
+  _PostUI([this]() {
+    if (m_ui)
+      m_ui->Hide();
+  });
+}
+
+void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id, bool add_session) {
+  // Called with the api lock held (pipe worker or deferred librime task).
+  // Nothing here may touch the candidate window: only the message thread owns
+  // it, and a worker waiting for that thread while holding the api lock is a
+  // deadlock against deferred work that needs the same lock.
+  if (!m_ui)
+    return;
+  _PostUI([this, ipc_id, add_session]() {
+    _ApplyUILocked(ipc_id, add_session);
+  });
+}
+
+void RimeWithWeaselHandler::_ApplyUILocked(WeaselSessionId ipc_id,
+                                           bool add_session) {
+  // Server message thread.  The lock is needed to read librime state, and the
+  // wait is bounded: skipping one window refresh is harmless (the next key or
+  // LM poll re-applies the live state), stalling the message loop is not.
+  ApiLockGuard guard("apply_ui", kUiApplyLockMs);
+  if (!guard) {
+    const auto snapshot = ApiLock::instance().Inspect();
+    char line[384];
+    _snprintf_s(line, sizeof(line), _TRUNCATE,
+                "candidate window refresh skipped: api lock held by '%s' for %llu ms",
+                snapshot.op, snapshot.held_ms);
+    WatchdogLog(line);
+    return;
+  }
+  _ApplyUI(ipc_id, add_session);
+}
+
+void RimeWithWeaselHandler::_ApplyUI(WeaselSessionId ipc_id, bool add_session) {
+  // Requires the api lock.  Runs on the server message thread, which owns the
+  // candidate window, so all window calls below are same-thread operations.
   if (!m_ui)
     return;
 
@@ -710,7 +898,7 @@ void RimeWithWeaselHandler::_UpdateUI(WeaselSessionId ipc_id) {
   else
     session_status.style.client_caps &= ~INLINE_PREEDIT_CAPABLE;
 
-  if (!_ShowMessage(weasel_context, weasel_status)) {
+  if (!_ShowMessage(weasel_context, weasel_status, add_session)) {
     m_ui->Hide();
     m_ui->Update(weasel_context, weasel_status);
   }
@@ -847,7 +1035,9 @@ void RimeWithWeaselHandler::_LoadAppInlinePreeditSet(WeaselSessionId ipc_id,
     _UpdateInlinePreeditStatus(ipc_id);
 }
 
-bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
+bool RimeWithWeaselHandler::_ShowMessage(Context& ctx,
+                                         Status& status,
+                                         bool add_session) {
   std::lock_guard<std::mutex> lock(m_notifier_mutex);
   if (m_message_type.empty() || m_message_value.empty())
     return m_ui->IsCountingDown();
@@ -910,8 +1100,7 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
   } else {
     return m_ui->IsCountingDown();
   }
-}
-inline std::string _GetLabelText(const std::vector<Text>& labels,
+}inline std::string _GetLabelText(const std::vector<Text>& labels,
                                  int id,
                                  const wchar_t* format) {
   wchar_t buffer[128];

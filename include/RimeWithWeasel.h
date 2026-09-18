@@ -1,6 +1,7 @@
 #pragma once
 #include <WeaselIPC.h>
 #include <WeaselUI.h>
+#include <atomic>
 #include <map>
 #include <string>
 #include <mutex>
@@ -68,22 +69,47 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
                          const std::string& opt,
                          bool val);
   virtual void UpdateColorTheme(BOOL darkMode);
+  virtual void OnMaintenanceWatchdog();
 
   void OnUpdateUI(std::function<void()> const& cb);
   // Register a poster that runs a callback on the server message thread.
   void OnPostToServerThread(std::function<void(std::function<void()>)> poster) {
     m_post_to_server_thread = std::move(poster);
   }
+  // Register a poster for *window* work.  The candidate window belongs to the
+  // server message thread, so every Show/Hide/Update/MoveTo has to happen
+  // there; a pipe worker doing it while holding the api lock could be left
+  // waiting for the message thread, which is itself waiting for that lock.
+  void OnPostUIToServerThread(
+      std::function<void(std::function<void()>)> poster) {
+    m_post_ui_to_server_thread = std::move(poster);
+  }
 
  private:
   void _Setup();
   bool _IsDeployerRunning();
-  void _UpdateUI(WeaselSessionId ipc_id);
+  bool _HasServerMessageLoop() const;
+  void _PostUI(std::function<void()> fn);
+  // Called with the api lock held (pipe worker or deferred task): only takes a
+  // snapshot of the request and defers the window work.
+  void _UpdateUI(WeaselSessionId ipc_id, bool add_session = false);
+  // Runs on the server message thread, takes the api lock with a deadline.
+  void _ApplyUILocked(WeaselSessionId ipc_id, bool add_session);
+  // Requires the api lock to be held.
+  void _ApplyUI(WeaselSessionId ipc_id, bool add_session);
+  void _HideUI();
+  void _ApplyInputPosition(RECT const& rc, WeaselSessionId ipc_id);
+  // Re-initializes librime outside a client request: a maintenance resume can
+  // take minutes (join_maintenance_thread) and must never run inside a key or
+  // session request while holding the api lock.
+  void _ResumeMaintenanceAsync();
   void _LoadSchemaSpecificSettings(WeaselSessionId ipc_id,
                                    const std::string& schema_id);
   void _LoadAppInlinePreeditSet(WeaselSessionId ipc_id,
                                 bool ignore_app_name = false);
-  bool _ShowMessage(weasel::Context& ctx, weasel::Status& status);
+  bool _ShowMessage(weasel::Context& ctx,
+                    weasel::Status& status,
+                    bool add_session);
   bool _Respond(WeaselSessionId ipc_id, EatLine eat);
   void _ReadClientInfo(WeaselSessionId ipc_id, LPWSTR buffer);
   void _GetCandidateInfo(weasel::CandidateInfo& cinfo, RimeContext& ctx);
@@ -109,7 +135,8 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   AppOptionsByAppName m_app_options;
   weasel::UI* m_ui;  // reference
   DWORD m_active_session;
-  bool m_disabled;
+  // Read from the watchdog and from window code without the api lock.
+  std::atomic<bool> m_disabled;
   std::string m_last_schema_id;
   std::string m_last_app_name;
   weasel::UIStyle m_base_style;
@@ -117,6 +144,16 @@ class RimeWithWeaselHandler : public weasel::RequestHandler {
   std::map<std::string, bool> m_show_notifications_base;
   std::function<void()> _UpdateUICallback;
   std::function<void(std::function<void()>)> m_post_to_server_thread;
+  std::function<void(std::function<void()>)> m_post_ui_to_server_thread;
+  // At most one outstanding language-model refresh: the deferred task re-reads
+  // the live composition, so extra notifications only pile up on the api lock.
+  std::atomic<bool> m_lm_refresh_posted{false};
+  std::atomic<bool> m_resume_in_flight{false};
+  // Message thread only (maintenance watchdog).
+  unsigned long long m_disabled_since = 0;
+  // Throttles background resume attempts (a key press while the service is
+  // disabled must not spawn one thread each).
+  std::atomic<unsigned long long> m_last_resume_kick{0};
 
   static void OnNotify(void* context_object,
                        uintptr_t session_id,

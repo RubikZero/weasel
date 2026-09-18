@@ -154,8 +154,18 @@ HANDLE PipeChannelBase::_ConnectServerPipe(std::wstring& pn) {
       CreateNamedPipe(pn.c_str(), PIPE_ACCESS_DUPLEX,
                       PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
                       PIPE_UNLIMITED_INSTANCES, buff_size, buff_size, 0, sa);
-  if (pipe == INVALID_HANDLE_VALUE || !::ConnectNamedPipe(pipe, NULL)) {
+  if (pipe == INVALID_HANDLE_VALUE) {
     _ThrowLastError;
+  }
+  if (!::ConnectNamedPipe(pipe, NULL)) {
+    const DWORD err = ::GetLastError();
+    // A client may connect between CreateNamedPipe() and ConnectNamedPipe();
+    // that is success, not an error.  Discarding the instance here threw away a
+    // live connection and left the client waiting on a dead handle.
+    if (err != ERROR_PIPE_CONNECTED) {
+      ::CloseHandle(pipe);
+      _ThrowCode(err);
+    }
   }
   return pipe;
 }

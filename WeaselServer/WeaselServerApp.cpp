@@ -33,6 +33,10 @@ int WeaselServerApp::Run() {
   m_handler->OnUpdateUI([this]() { tray_icon.RequestRefresh(); });
   m_handler->OnPostToServerThread(
       [this](std::function<void()> fn) { m_server.PostRime(std::move(fn)); });
+  // Candidate-window work must run on this thread, which owns the window.
+  // Pipe workers only take a snapshot and post here.
+  m_handler->OnPostUIToServerThread(
+      [this](std::function<void()> fn) { m_server.Post(std::move(fn)); });
 
   tray_icon.Create(m_server.GetHWnd());
   m_server.SetTrayRefreshCallback([this]() { tray_icon.ApplyRefresh(); });

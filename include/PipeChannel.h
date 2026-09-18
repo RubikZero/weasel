@@ -45,6 +45,9 @@ class PipeChannelBase {
   bool _WaitReadable(HANDLE pipe, DWORD timeout_ms) const;
   /* Try to get a connection from client */
   HANDLE _ConnectServerPipe(std::wstring& pn);
+  /* A client may reconnect and retry a failed send; the server writes to an
+     accepted connection handle, where a retry would connect to its own pipe. */
+  virtual bool _ReconnectOnSendFailure() const { return true; }
   inline bool _Invalid(HANDLE p) const { return p == INVALID_HANDLE_VALUE; }
 
   HANDLE* _GetPipeHandle() const {
@@ -178,6 +181,14 @@ class PipeChannel : public PipeChannelBase {
     try {
       _WritePipe(pipe, data_sz, pbuff);
     } catch (...) {
+      if (!_ReconnectOnSendFailure()) {
+        // Server side: the connection is gone.  Reconnecting here would open a
+        // client connection to this very server, leaking a pipe instance and
+        // stranding another worker thread in _Receive().  Close the connection
+        // instead and let the client reconnect.
+        ClearBufferStream();
+        throw;
+      }
       _Reconnect();
       _WritePipe(pipe, data_sz, pbuff);
     }
