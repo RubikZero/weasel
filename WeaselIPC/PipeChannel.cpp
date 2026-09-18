@@ -1,5 +1,7 @@
 #include "stdafx.h"
 
+#include <cstdlib>
+
 #include <PipeChannel.h>
 
 using namespace weasel;
@@ -19,6 +21,37 @@ PipeChannelBase::PipeChannelBase(std::wstring&& pn_cmd,
                                  size_t bs = 4 * 1024,
                                  SECURITY_ATTRIBUTES* s = NULL)
     : pname(pn_cmd), buff_size(bs), sa(s) {};
+
+DWORD weasel::IpcReadTimeoutMs() {
+  static const DWORD timeout = []() -> DWORD {
+#pragma warning(suppress : 4996)
+    if (const char* env = std::getenv("RIME_WEASEL_IPC_TIMEOUT_MS")) {
+      const int value = std::atoi(env);
+      if (value >= 100 && value <= 60000)
+        return static_cast<DWORD>(value);
+    }
+    return 3000;
+  }();
+  return timeout;
+}
+
+bool PipeChannelBase::_WaitReadable(HANDLE pipe, DWORD timeout_ms) const {
+  // ReadFile() on a message-mode pipe blocks until a whole message arrives.
+  // Poll first so the wait can be bounded and the UI thread stays responsive.
+  const DWORD kStepMs = 2;
+  DWORD waited = 0;
+  for (;;) {
+    DWORD available = 0;
+    if (!::PeekNamedPipe(pipe, NULL, 0, NULL, &available, NULL))
+      return false;  // server gone / connection closed
+    if (available > 0)
+      return true;
+    if (waited >= timeout_ms)
+      return false;
+    ::Sleep(kStepMs);
+    waited += kStepMs;
+  }
+}
 
 PipeChannelBase::~PipeChannelBase() {
   // Thread-specific pointers are cleaned up automatically
@@ -40,8 +73,17 @@ bool PipeChannelBase::_Ensure() {
 
 HANDLE PipeChannelBase::_Connect(const wchar_t* name) {
   HANDLE pipe = INVALID_HANDLE_VALUE;
-  while (_Invalid(pipe = _TryConnect()))
-    ::WaitNamedPipe(name, 500);
+  // Connecting can block forever when every server pipe instance is busy --
+  // which is exactly what a stalled server looks like.  This call happens on
+  // the host application's UI thread (_EnsureServerConnected -> _Reconnect), so
+  // an unbounded wait here froze every application that touched the IME,
+  // explorer.exe included.  Give up after the same deadline used for reads.
+  const DWORD deadline = ::GetTickCount() + IpcReadTimeoutMs();
+  while (_Invalid(pipe = _TryConnect())) {
+    if (::GetTickCount() >= deadline)
+      return INVALID_HANDLE_VALUE;
+    ::WaitNamedPipe(name, 100);
+  }
   DWORD mode = PIPE_READMODE_MESSAGE;
   if (!SetNamedPipeHandleState(pipe, &mode, NULL, NULL)) {
     _ThrowLastError;
@@ -73,7 +115,13 @@ size_t PipeChannelBase::_WritePipe(HANDLE pipe, size_t s, char* b) {
   if (!::WriteFile(pipe, b, s, &lwritten, NULL) || lwritten <= 0) {
     _ThrowLastError;
   }
-  ::FlushFileBuffers(pipe);
+  // Deliberately no FlushFileBuffers() here.  On a named pipe it blocks until
+  // the peer has read the data, so a stalled peer turns this into an unbounded
+  // wait; on the server side that wait used to happen while holding the global
+  // API mutex, which froze every application talking to the IME (explorer.exe
+  // included) until the machine was powered off.  Message-mode pipes deliver
+  // each WriteFile as one complete message, so the request/response protocol
+  // does not need an explicit flush.
   return lwritten;
 }
 

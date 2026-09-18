@@ -8,6 +8,11 @@
 
 namespace weasel {
 
+// Deadline for one client-side IPC transaction (milliseconds).  Overridable
+// with RIME_WEASEL_IPC_TIMEOUT_MS for experiments; a stalled server must never
+// block a host application's message loop indefinitely.
+DWORD IpcReadTimeoutMs();
+
 class PipeChannelBase {
  public:
   using Stream = boost::interprocess::wbufferstream;
@@ -36,6 +41,8 @@ class PipeChannelBase {
   size_t _WritePipe(HANDLE p, size_t s, char* b);
   void _FinalizePipe(HANDLE& p);
   void _Receive(HANDLE pipe, LPVOID msg, size_t rec_len);
+  /* Bounded wait for a readable message; false on timeout or broken pipe */
+  bool _WaitReadable(HANDLE pipe, DWORD timeout_ms) const;
   /* Try to get a connection from client */
   HANDLE _ConnectServerPipe(std::wstring& pn);
   inline bool _Invalid(HANDLE p) const { return p == INVALID_HANDLE_VALUE; }
@@ -180,6 +187,16 @@ class PipeChannel : public PipeChannelBase {
   _TyRes _ReceiveResponse() {
     HANDLE* phandle = _GetPipeHandle();
     _TyRes result;
+    // Every client transaction is issued from the host application's UI thread
+    // (key events and the LM refresh poll).  A plain blocking read waits
+    // forever when the server is stalled, which froze every application that
+    // talks to the IME -- explorer.exe included -- until the machine was power
+    // cycled.  Wait with a deadline instead: drop the connection and report a
+    // timeout so the caller can reconnect while its UI thread stays alive.
+    if (!_WaitReadable(*phandle, IpcReadTimeoutMs())) {
+      _FinalizePipe(*phandle);
+      throw static_cast<DWORD>(ERROR_TIMEOUT);
+    }
     _Receive(*phandle, &result, sizeof(result));
     return result;
   }

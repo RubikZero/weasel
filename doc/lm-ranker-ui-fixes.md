@@ -118,34 +118,47 @@
   `third-party/lm-train/onnx/mlm_ft_v2/model.onnx` **SHA256 完全一致**（mask_index 图，
   35,190,753 字节），**不是** `model_full.onnx`；不存在"全量 logits → 每次 1.4GB"的内存耗尽路径。
 
-### 机制分析（放大器是确定的）
-客户端所有 IPC 都是**阻塞式事务**（`PipeChannel::Transact` = `_Send` + **无超时**
-`_ReceiveResponse`，`include/PipeChannel.h:120-125`、`:180-185`；`_Receive` 内是无超时的
-`ReadFile`，`WeaselIPC/PipeChannel.cpp:88-102`），且都在**应用的 UI 线程**上发起
-（按键路径 `KeyEventSink.cpp`；LM 轮询 `_PollLmRefresh`）。因此：
+### 机制分析（已定位并复现）
+客户端所有 IPC 都是**阻塞式事务**，且都在**应用的 UI 线程**上发起（按键路径、LM 轮询）。
+把三处无界等待串起来就得到了整机卡死的完整链条：
 
-> 只要服务端在持锁期间停顿，**每一个与输入法交互的应用（包括 explorer.exe）其 UI 线程都会
-> 卡在无超时的管道读上** → 浏览器先卡、切焦点时新窗口与桌面/Explorer 一起卡 → 只能断电。
+1. `PipeChannelBase::_WritePipe()` 在 `WriteFile` 之后调用 **`::FlushFileBuffers(pipe)`**——
+   对命名管道，它会**一直等到对端把数据读走**（`WeaselIPC/PipeChannel.cpp`）。
+2. 服务端是在**持有全局 `g_api_mutex` 的情况下**调用 `resp(result)` 写响应的
+   （`WeaselServerImpl::Run` 的 listener，`HandlePipeMessage` 内 `resp(result)`）。
+3. 于是只要**有一个客户端不读**（浏览器卡住/被杀/UI 线程被占），服务端那一个连接的工作线程
+   就会**持锁阻塞在 flush 上** → 其余所有客户端的请求都拿不到锁 → 它们的 UI 线程卡在
+   **无超时的 `ReadFile`**（`_ReceiveResponse`）或**无界的连接等待**（`_Connect` 里
+   `while (...) WaitNamedPipe(500)`）→ **浏览器先卡、切焦点时新窗口/Explorer 一起卡** →
+   只能断电。日志"处理正常到 10:02:56 后直接停住、无报错、无转储"完全符合"持锁阻塞"。
 
-这解释了"为什么一个输入法问题能让整机 UI 冻结"，也是必须优先修掉的**放大器**。
-服务端停顿的具体触发点尚未定位（日志到此为止、无线程栈），代码上有三条可疑路径：
-1. LM 通知任务在 `g_api_mutex` 内执行 UI 工作（`PostRime` → 刷新全部会话 → `_UpdateUI`
-   → 面板绘制 `UpdateLayeredWindow` / 提示窗 `ShowWindow`+`SetTimer` / `_RefreshTrayIcon`）；
-   托盘路径已改为 `RequestRefresh`（只投递、不调 `Shell_NotifyIcon`，`WeaselServerApp.cpp:33`），
-   但其它窗口操作仍可能同步等待其它进程的 UI 线程。
-2. 通知风暴：多个后台任务完成 → 每次 `Notify` 都触发"刷新全部会话"，形成重入/抖动。
-3. 09-17 14:44:36/40 存在两个 `WeaselServer.exe` 崩溃转储（`%TEMP%\rime.weasel\`），
-   说明该路径此前确实崩过，需要一并分析（转储已留档）。
+**已实施修复（本轮）**
+| 位置 | 改动 |
+|---|---|
+| `WeaselIPC/PipeChannel.cpp` | 删除 `_WritePipe` 里的 `::FlushFileBuffers(pipe)`：消息模式管道每条 `WriteFile` 就是一条完整消息，不需要 flush；留着它等于"等服务端消费"，对端一卡就无界等待 |
+| `WeaselIPC/PipeChannel.cpp` | `_Connect()` 的连接等待加上与读超时同源的**截止时间**（原来是 `while(...) WaitNamedPipe(500)` 永不放弃）；新增 `IpcReadTimeoutMs()`（默认 3000ms，可用 `RIME_WEASEL_IPC_TIMEOUT_MS` 覆盖） |
+| `include/PipeChannel.h` | `_ReceiveResponse()` 改为先 `_WaitReadable()`（`PeekNamedPipe` 轮询 + 截止时间）再读；超时则关闭连接并抛 `ERROR_TIMEOUT`，由 `ClientImpl::_SendMessage` 捕获为失败 → `Echo()` 失败 → 客户端重连，**UI 线程不再被永久占用** |
+| `WeaselIPCServer/WeaselServerImpl.cpp` | 响应的实际写出**移出 `g_api_mutex`**：锁内只计算（librime 非线程安全），`resp(result)` 在锁外执行 → **单个卡住的客户端只阻塞它自己的连接线程**，不再拖死所有会话 |
 
-### 待实施的防御措施（按优先级）
-1. **客户端管道读加超时/可取消**（最关键）：`PipeChannel` 改为 overlapped `ReadFile` +
-   超时（或看门狗线程 `CancelSynchronousIo`），超时即视为事务失败 → `Echo()` 失败 →
-   重连；这样**任何服务端停顿都不再冻结应用 UI**。
-2. **服务端 UI 工作移出 `g_api_mutex`**：拆开"读 librime"与"画界面"（librime 读取留在锁内，
-   窗口/托盘/绘制在锁外），并保证同一时刻只有一个刷新任务在飞（合并通知）。
-3. **只刷新有组合的会话**（当前遍历全部会话），降低持锁时间。
-4. `EndMaintenance()` 不再无条件清空整个会话表。
-5. 客户端轮询加"上一次未返回则跳过"，并加会话/上下文有效性守护（问题 A 的防御）。
+### 验证（可复现）
+隔离运行时（`RIME_WEASEL_PIPE_NAME` + `RIME_WEASEL_USER_DIR`）+ 把隔离服务端**所有线程挂起**
+模拟停顿，再用 IPC 端到端客户端（`third-party/lm-test/weasel_ipc_lm_e2e.exe`）测：
+
+| 场景 | 修复前 | 修复后 |
+|---|---|---|
+| 正常路径（真实服务端） | `lm_candidate=yes` | `lm_candidate=yes`，1.0s，exit=0 |
+| 服务端停顿，`RIME_WEASEL_IPC_TIMEOUT_MS=1000` | **挂死 >300s**（工具超时） | 7.8s 失败返回（多次事务各自超时），exit=2 |
+| 服务端停顿，`RIME_WEASEL_IPC_TIMEOUT_MS=4000` | 同上 | 4.0s 失败返回，exit=2 |
+
+> 修复前的挂死点正是 `FlushFileBuffers`（在连接成功、请求已写出之后），这也解释了
+> 为什么之前的"无响应"分析只看到"读"这一侧是不够的。
+
+### 仍需实施（后续）
+1. **服务端只刷新有组合的会话**（当前每次 LM 通知都遍历全部会话），并合并同一时刻的多次通知——
+   进一步缩短持锁时间。
+2. 客户端轮询加"上一次未返回则跳过"，并加会话/上下文有效性守护（问题 A 的防御）。
+3. `EndMaintenance()` 不再无条件清空整个会话表。
+4. 分析 09-17 14:44:36/40 的两个 `WeaselServer.exe` 崩溃转储（`%TEMP%\rime.weasel\`）。
 
 ---
 

@@ -1,4 +1,4 @@
-﻿#include "stdafx.h"
+#include "stdafx.h"
 #include "WeaselServerImpl.h"
 #include <memory>
 #include <mutex>
@@ -230,8 +230,17 @@ int ServerImpl::Run() {
   // auto listener = boost::bind(&PipeServer::Listen, channel.get(), handler);
   //
   auto listener = [this](PipeMessage msg, PipeServer::Respond resp) -> void {
-    std::lock_guard guard(g_api_mutex);
-    HandlePipeMessage(msg, resp);
+    DWORD result = 0;
+    {
+      // Compute the reply while holding the lock (librime is not thread safe),
+      // but hand it to the pipe only after releasing it: sending a response can
+      // block until the client reads it, and a stalled client must never hold
+      // the global API mutex -- that used to freeze every other session (and
+      // explorer.exe with it) until the machine was power cycled.
+      std::lock_guard guard(g_api_mutex);
+      HandlePipeMessage(msg, [&result](DWORD value) { result = value; });
+    }
+    resp(result);
   };
   pipeThread = std::make_unique<boost::thread>(
       [this, &listener]() { channel->Listen(listener); });
