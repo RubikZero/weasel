@@ -110,41 +110,86 @@ rank hit t=…251 items=50           ← 762 ms 后菜单才刷新
 即：**流水线地板 ≈ 46 ms**；默认轮询间隔下用户看到 ≈ 轮询间隔 + 20 ms。
 优化后结果在第一次轮询时就已经就绪（`polls_median` 由 5–19 降到 **1**）。
 
-## 六、下一步可做的两件事（尚未实现）
+## 六、已实现的第二项优化：客户端不再空轮询（`lm_pending`）
 
-1. **客户端轮询可以更早停止、也更密一点**（纯客户端改动，收益 ≈ 80 ms）：
-   现在 TSF 每次按键固定轮询最多 12 次（1.5 s），即使结果早已就绪；而第一次轮询往往就拿到了结果。
-   设计：插件在 `Apply` 中把"是否仍有 LM 作业在跑"写入上下文属性（`set_property`），
-   服务端把它放进响应（如 `config.lm_pending=0/1`），TSF 在 `lm_pending=0` 时立即
-   `_CancelLmRefresh()`，并把 `ui_refresh/interval_ms` 从 120 ms 调到 40–60 ms。
-   预期：可见延迟 142 → 60–80 ms，同时每次按键的 IPC 事务数显著下降。
-2. **模型导出层面的大头**：当前图输出**所有位置**的 logits（`[batch, seq, 21128]`，ctx=256 时
-   单批约 350 MB），而打分只需要 `mask_index` 那一个位置。若在导出的 ONNX 里先按
-   `mask_index` 取 hidden state 再做 LM head，理论上可再省 90%+ 的计算，
-   从而在**保留 256 窗口保真度**的前提下把单条作业压到 10 ms 量级。
-   这属于 `third-party/lm-train` 的导出改动，建议作为独立一轮。
+原来 TSF 每次按键都会把刷新预算（1.5 s）用满：最多 12 次 `ProcessKeyEvent(0)` 事务，
+即使结果早就到了。现在：
 
-## 七、建议
+- 插件在每次 `Apply` 时把"这条组字是否还有 LM 作业在跑"写入上下文属性 `lm_pending`
+  （`RankService::Pending(key)` 或 `SentenceService::Pending(input)`）；
+- 服务端把它放进响应（`config.lm_pending=0/1`）；
+- TSF 在 `DoEditSession` 里看到 0 就立即 `_CancelLmRefresh()`，并停止后续轮询。
 
-- **立即采用**：优化 1（可取消打分，已经默认生效）与 `max_context` 修复（无行为变化）。
-- **需要你决定**：是否把编码窗口改成**自适应**（例如 `min(max_context, 上下文实际字数上取整到 8 + 8)`，
-  下限 32）——短上下文时自动获得 8 倍加速，长上下文时保持 256 的保真度；
-  代价是短上下文场景下候选尾部顺序可能与现在略有不同（首位不受影响）。
-  保持现状也可以：把 `%APPDATA%\Rime\lm_ranker.yaml` 里的 `max_context` 设为 32/64/128 手动取舍。
+同时把默认轮询节奏从 `initial_ms/interval_ms = 120/120` 改为 **60/60**（yaml 里写死
+`ui_refresh` 的用户不受影响，例如你当前的配置是 100/50）。
 
-## 八、复现命令
+实测（隔离服务端；每次运行用**不同的上下文**，避免命中上一次的重排缓存）：
+
+| 用例 | ctx=256（默认） | ctx=32 | 每键轮询次数 |
+|---|---|---|---|
+| 单字 `ni` | 237 ms | **78 ms** | 3 → 1 |
+| 词组 `beijing` | 158 ms | **78 ms** | 2 → 1 |
+| 整句 `beijingdaxue` | 237 ms | **77 ms** | 5 → 3 |
+
+`unsafe_early_stop=0`：所有运行里，客户端停止轮询时菜单**已经**刷新完毕（提前停止是安全的）。
+
+> 修正第四节的说明：早先 20 ms 轮询下测到的 "46 ms 地板"里，有一部分是**重复使用同一
+> 上下文**造成的缓存命中。探针现在每次运行使用不同上下文，上表是未命中缓存时的真实数字。
+
+## 七、上下文长度与训练时的窗口（回答提问）
+
+查阅训练材料得到的结论（`third-party/lm-train`）：
+
+| 项目 | 事实 | 依据 |
+|---|---|---|
+| 基础模型 | BERT，`hidden 256 / 4 层 / max_position_embeddings 512` | `third-party/models/uer/chinese_roberta_L-4_H-256/config.json`、`onnx/mlm_ft_v2/lm_config.json` |
+| v1 重排微调 | 上下文窗口 **64** | `reranker/data.npz` 里 `ctx.npy` 形状 `(285421, 64)` |
+| **v2 微调（当前上线模型 `mlm_ft_v2`）** | 上下文窗口 **256**（固定，左填充 0 = [PAD]，attention mask 屏蔽） | `reranker_v2/data.npz` 里 `ctx.npy` 形状 `(319883, 256)` |
+| 损失 | **候选择集的 softmax**（cross entropy over ~21 个候选），取 `logits[:, -2, :]`（mask 位置） | `train_mlm_reranker.py` |
+
+关键点：**训练时上下文长度是可变的**——打包脚本对每个样本做 `context[-ctx_len:]` 后
+**右对齐、左侧补 0**（`build_reranker_npz.py`），所以窗口内 0..255 每个位置在不同样本里
+既可能是 padding、也可能是真实上文；掩码把 padding 的注意力屏蔽掉。
+因此"窗口长度"本身不是模型学到的语义，真正随窗口变化的是**真实上文的绝对位置编码**。
+
+这与实测一致：
+
+| 场景 | 窗口 256 vs 32 的首位一致率 |
+|---|---|
+| 上下文 21 字（窗口只是变短，**减掉的全是 padding**） | **10/10** |
+| 30 条真实用例、上下文 256 字（缩短窗口**会丢掉真上文**） | **26/30（87%）**；整序一致 7/30；平均名次位移 0.50 |
+
+结论：**泛化能力足以支持不同窗口长度，但前提是不要把真实上文截掉**。所以推荐把窗口做成
+自适应的（`min(max_context, 实际字数上取整到 8 + 8)`，下限 32）：短上下文拿到 8 倍加速且
+首位不变，长上下文维持 256 的保真度。是否采用由你决定（参见第九节）。
+
+## 八、下一步可做（尚未实现）
+
+1. **ONNX 导出改造**：当前图输出**所有位置**的 logits（ctx=256 时单批约 350 MB），
+   而打分只用 `mask_index` 那一个位置。导出时先按 `mask_index` 取 hidden state 再做 LM 头，
+   可在**保留 256 窗口保真度**的前提下把单条作业压到 10 ms 量级。
+2. 自适应窗口（见上）。
+
+## 九、建议
+
+- **立即采用**：可取消打分、`max_context` 修复、`lm_pending` 提前停止（都已默认生效）。
+- **需要你决定**：自适应窗口默认值。
+
+## 十、复现命令
 
 ```powershell
 # 延迟矩阵（隔离环境，自动启停服务端）
 powershell -File weasel\tools\ipc_latency_test.ps1
-powershell -File weasel\tools\ipc_latency_test.ps1 -Cases "ni=char,beijing=word" -Polls "120,60,40,20"
+powershell -File weasel\tools\ipc_latency_test.ps1 -Cases "ni=char,beijing=word" -Polls "60,40,20"
 
-# 上下文窗口的速度/一致性对比（无头 harness）
+# 上下文窗口的速度/一致性（10 个手工用例）
 $env:RIME_LM_RANKER_DEBUG = "1"
 powershell -File weasel\tools\ctx_window_parity.ps1 -Window 32
+# 30 条真实用例（来自 v2 训练请求集）
+powershell -File weasel\tools\ctx_window_eval.ps1 -Window 32 -Limit 30
 ```
 
-## 九、本轮改动文件
+## 十一、本轮改动文件
 
 | 文件 | 改动 |
 |---|---|
@@ -152,5 +197,26 @@ powershell -File weasel\tools\ctx_window_parity.ps1 -Window 32
 | `librime/plugins/lm_ranker/lm_rank_service.{h,cc}` | 取消标志与排队/打分/取消的打点；`WaitIdle`/`Pending` 供后续轮询优化使用 |
 | `librime/plugins/lm_ranker/lm_ranker.cc` | `rank hit/miss/skip` 带时间戳 |
 | `weasel/tools/ipc_latency_test.ps1`（新增） | 延迟矩阵 |
-| `weasel/tools/ctx_window_parity.ps1`（新增） | 窗口速度/一致性对比 |
-| `third-party/lm-test/weasel_ipc_latency_e2e.cc`、`build_weasel_ipc_latency_e2e.cmd`（新增，不在 git 内） | 延迟探针客户端 |
+| `weasel/tools/ctx_window_parity.ps1`、`ctx_window_eval.ps1`（新增） | 窗口速度/一致性对比（后者用 30 条真实用例 + 真实上下文） |
+| `third-party/lm-test/weasel_ipc_latency_e2e.cc`、`build_weasel_ipc_latency_e2e.cmd`（新增，不在 git 内） | 延迟探针客户端（按 TSF 节奏轮询、解析 `lm_pending`、每次运行用独立上下文） |
+| `weasel/include/WeaselIPCData.h`、`WeaselIPC/Configurator.cpp` | `Config::lm_pending` 与其解析 |
+| `weasel/WeaselTSF/EditSession.cpp` | `lm_pending=0` 时立即停止轮询 |
+| `weasel/RimeWithWeasel/RimeWithWeasel.cpp` | 响应里带上 `config.lm_pending`；默认轮询节奏 120/120 → 60/60；隔离实例不再弹出提示；失败提示改为真实日志目录 |
+| `librime/plugins/lm_ranker/lm_ranker.cc`、`lm_sentence.{h,cc}`（独立仓库） | `PublishPending` / `SentenceService::Pending`（`lm_pending` 来源） |
+
+## 十二、附带修复：屏幕左上角的"有错误"提示
+
+用户报障：两次在屏幕左上角弹出"有错误，请查看……%weasel.info"，一闪而过。
+
+- **来源**：是**我启动的隔离测试服务端**弹出的（其日志目录在本会话临时目录
+  `…\dsh-*\rime.weasel\`，其中 `ERROR` 日志给出 `deployment_tasks.cc:208] missing input
+  schema: quick5`）；不是用户正在使用的输入法。生产侧最近只有一条无害告警
+  （`missing input schema; skipped unsatisfied dependency: pinyin_simp`，14:20）。
+- **原因**：测试夹具 `third-party/lm-test/runtime/data/default.yaml` 的 `schema_list` 里含
+  `quick5`（上游 Rime 自带、Weasel 数据目录并不提供），而该夹具的用户目录没有
+  `default.custom.yaml` 覆盖它 → 每次维护部署都失败 → 弹失败提示；隔离实例没有光标位置，
+  面板落在 (0,0) = 屏幕左上角，所以提示出现在左上角。
+- **修复**：① 给夹具加 `default.custom.yaml`（只列存在的方案），部署不再失败（已验证：
+  重跑测试不再产生新的 ERROR 日志）；② 产品侧加固——以私有管道名启动的**隔离实例不再弹出
+  任何提示**（失败仍然进日志），避免自动化测试打扰用户；③ 失败提示里的 `%TEMP%` 字面量改为
+  **真实日志目录**，这样一闪而过的提示里也能看清位置。

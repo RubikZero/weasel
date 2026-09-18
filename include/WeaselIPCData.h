@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <string>
 #include <vector>
@@ -191,15 +191,20 @@ struct Config {
   void reset() {
     inline_preedit = false;
     lm_refresh_enabled = false;
-    lm_refresh_initial_ms = 120;
-    lm_refresh_interval_ms = 120;
+    lm_refresh_initial_ms = 60;
+    lm_refresh_interval_ms = 60;
     lm_refresh_timeout_ms = 1500;
+    lm_pending = false;
   }
   bool inline_preedit;
   bool lm_refresh_enabled;
   int lm_refresh_initial_ms;
   int lm_refresh_interval_ms;
   int lm_refresh_timeout_ms;
+  // True while the language model still has work queued for the current
+  // composition.  The client only needs to poll for the refreshed menu while
+  // this is set, instead of polling for the whole refresh budget.
+  bool lm_pending;
 };
 
 struct UIStyle {

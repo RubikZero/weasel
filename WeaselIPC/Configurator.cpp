@@ -27,5 +27,7 @@ void Configurator::Store(Deserializer::KeyType const& key,
     m_pTarget->p_config->lm_refresh_interval_ms = _wtoi(value.c_str());
   } else if (key[1] == L"lm_refresh_timeout_ms") {
     m_pTarget->p_config->lm_refresh_timeout_ms = _wtoi(value.c_str());
+  } else if (key[1] == L"lm_pending") {
+    m_pTarget->p_config->lm_pending = bool_value;
   }
 }

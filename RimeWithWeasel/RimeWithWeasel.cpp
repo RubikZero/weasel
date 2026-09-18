@@ -182,8 +182,11 @@ void RimeWithWeaselHandler::Initialize() {
 }
 
 void RimeWithWeaselHandler::_LoadLmRefreshSettings() {
-  constexpr int kDefaultInitialMs = 120;
-  constexpr int kDefaultIntervalMs = 120;
+  // The first poll carries the user-visible delay of an asynchronous rerank
+  // (the result is normally ready within ~50ms), so poll early and then more
+  // slowly; the client stops as soon as the server reports nothing pending.
+  constexpr int kDefaultInitialMs = 60;
+  constexpr int kDefaultIntervalMs = 60;
   constexpr int kDefaultTimeoutMs = 1500;
   m_lm_refresh_enabled = true;
   m_lm_refresh_initial_ms = kDefaultInitialMs;
@@ -1041,6 +1044,17 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx,
   std::lock_guard<std::mutex> lock(m_notifier_mutex);
   if (m_message_type.empty() || m_message_value.empty())
     return m_ui->IsCountingDown();
+  // A server started with a private pipe name is an isolated instance (test
+  // harness, diagnostics run).  Nobody is typing into it, so its tips carry no
+  // information for the user -- but they do pop up on the desktop of whoever
+  // started it, which is pure noise.  Failures still reach the rime log.
+  static const bool kIsolatedInstance = []() {
+    wchar_t pipe_name[MAX_PATH] = {0};
+    return ::GetEnvironmentVariableW(L"RIME_WEASEL_PIPE_NAME", pipe_name,
+                                     _countof(pipe_name)) > 0;
+  }();
+  if (kIsolatedInstance)
+    return m_ui->IsCountingDown();
   // show as auxiliary string
   std::wstring& tips(ctx.aux.str);
   bool show_icon = false;
@@ -1056,16 +1070,17 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx,
       else
         tips = L"部署完成";
     else if (m_message_value == "failure") {
+      // Point at the real log directory: the literal %TEMP% was unreadable in a
+      // tip that disappears after a couple of seconds.
+      const std::wstring log_dir = WeaselLogPath().wstring();
       if (GetThreadUILanguage() ==
           MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_TRADITIONAL))
-        tips = L"有錯誤，請查看日誌 %TEMP%\\rime.weasel\\rime.weasel.*.INFO";
+        tips = L"有錯誤，請查看日誌 " + log_dir;
       else if (GetThreadUILanguage() ==
                MAKELANGID(LANG_CHINESE, SUBLANG_CHINESE_SIMPLIFIED))
-        tips = L"有错误，请查看日志 %TEMP%\\rime.weasel\\rime.weasel.*.INFO";
+        tips = L"有错误，请查看日志 " + log_dir;
       else
-        tips =
-            L"There is an error, please check the logs "
-            L"%TEMP%\\rime.weasel\\rime.weasel.*.INFO";
+        tips = L"There is an error, please check the logs in " + log_dir;
     }
   } else if (m_message_type == "schema") {
     tips = /*L"【" + */ status.schema_name /* + L"】"*/;
@@ -1283,6 +1298,19 @@ bool RimeWithWeaselHandler::_Respond(WeaselSessionId ipc_id, EatLine eat) {
       .append(L"config.lm_refresh_timeout_ms=")
       .append(std::to_wstring(m_lm_refresh_timeout_ms))
       .append(L"\n");
+  // Whether the language model still has work for this composition.  The
+  // plugin publishes it as a context property; the client only needs to poll
+  // for the refreshed menu while it is set.
+  {
+    const int BUF_SIZE = 8;
+    char lm_pending[BUF_SIZE + 1] = {0};
+    bool pending = false;
+    if (rime_api->get_property(session_id, "lm_pending", lm_pending, BUF_SIZE))
+      pending = lm_pending[0] != '\0' && lm_pending[0] != '0';
+    body.append(L"config.lm_pending=")
+        .append(std::to_wstring((int)pending))
+        .append(L"\n");
+  }
 
   // style
   if (!session_status.__synced) {

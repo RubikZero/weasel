@@ -61,7 +61,12 @@ STDMETHODIMP WeaselTSF::DoEditSession(TfEditCookie ec) {
 
   if (ok && !compositionEnded)
     _UpdateCompositionWindow(_pEditSessionContext);
-  if (ok && (!_status.composing || !_lm_refresh_enabled))
+  // Stop polling as soon as the server reports that no language-model work is
+  // outstanding: the refreshed menu has already been delivered, and continuing
+  // would send a dozen more transactions per keystroke for nothing.  A later
+  // sentence result is covered too, because the plugin keeps reporting pending
+  // while a decode for this composition is queued or running.
+  if (ok && (!_status.composing || !_lm_refresh_enabled || !config.lm_pending))
     _CancelLmRefresh();
   else if (ok && !_lm_refresh_pending)
     _ScheduleLmRefresh();
