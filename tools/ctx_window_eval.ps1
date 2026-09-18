@@ -11,6 +11,7 @@ param(
   [string]$Testset = "D:\Workspace\rime\third-party\lm-test\testset",
   [string]$Shared = "D:\Workspace\rime\weasel\output\data",
   [int]$Window = 32,
+  [int]$MinWindow = 0,
   [int]$Limit = 30,
   [string]$Types = "char,word"
 )
@@ -50,21 +51,30 @@ Write-Host "cases=$($cases.Count) window=$Window types=$Types"
 
 function Invoke-Case([string]$userDir, [string]$keys, [string]$context) {
   $out = & $exe --shared $Shared --user $userDir --context $context --keys $keys --timeout-ms 15000 2>&1
+  # The harness prints the menu repeatedly (once per refresh); keep the groups
+  # and report the last one, including the [LM]-marked candidate of that group.
   $groups = New-Object System.Collections.ArrayList
+  $picks = New-Object System.Collections.ArrayList
   $current = New-Object System.Collections.ArrayList
+  $current_pick = ""
   foreach ($line in $out) {
     if ($line -match "^\s+(\d+)\s+([^\s]+)\s+([^\s]*)\s*(.*)$") {
       if ([int]$matches[1] -eq 1 -and $current.Count -gt 0) {
-        [void]$groups.Add(@($current)); $current = New-Object System.Collections.ArrayList
+        [void]$groups.Add(@($current)); [void]$picks.Add($current_pick)
+        $current = New-Object System.Collections.ArrayList; $current_pick = ""
       }
       [void]$current.Add($matches[2])
+      if ($matches[3] -eq "[lm_ranker]" -or $matches[4] -match "\[LM\]") {
+        $current_pick = $matches[2]
+      }
     }
   }
-  if ($current.Count -gt 0) { [void]$groups.Add(@($current)) }
+  if ($current.Count -gt 0) { [void]$groups.Add(@($current)); [void]$picks.Add($current_pick) }
   $score = @()
   foreach ($line in $out) { if ($line -match "rank scored\+publishing in ([\d.]+) ms") { $score += [double]$matches[1] } }
   [pscustomobject]@{
     final = if ($groups.Count -gt 0) { $groups[$groups.Count - 1] } else { @() }
+    lm_pick = if ($picks.Count -gt 0) { $picks[$picks.Count - 1] } else { "" }
     score_ms = if ($score.Count -gt 0) { ($score | Measure-Object -Average).Average } else { -1 }
   }
 }
@@ -78,9 +88,16 @@ $config = [System.IO.File]::ReadAllText($configPath)
 if ($config -notmatch "max_context") {
   $config = $config -replace "(?m)^  prior_beta:", "  max_context: $Window`r`n  prior_beta:"
 }
+# MinWindow pins the floor, which turns the adaptive rule into a fixed window
+# (both bounds equal) and makes this an adaptive-vs-fixed comparison.
+if ($MinWindow -gt 0) {
+  if ($config -match "min_context") { $config = $config -replace "(?m)^  min_context:.*$", "  min_context: $MinWindow" }
+  else { $config = $config -replace "(?m)^  prior_beta:", "  min_context: $MinWindow`r`n  prior_beta:" }
+}
 [System.IO.File]::WriteAllText($configPath, $config, $utf8)
 
 $top1_same = 0; $order_same = 0; $total = 0; $displacement = 0.0
+$pick_same = 0; $pick_compared = 0; $pick_missing = 0
 $score_long = @(); $score_short = @()
 foreach ($case in $cases) {
   $a = Invoke-Case $userDefault $case.keys $case.context
@@ -89,6 +106,15 @@ foreach ($case in $cases) {
   $total++
   if ($a.final[0] -eq $b.final[0]) { $top1_same++ }
   if (($a.final -join " ") -eq ($b.final -join " ")) { $order_same++ }
+  # Which candidate the model actually chose is the meaningful comparison; the
+  # menu order can also differ because the harness sampled it before the async
+  # result landed.
+  if ($a.lm_pick -ne "" -and $b.lm_pick -ne "") {
+    $pick_compared++
+    if ($a.lm_pick -eq $b.lm_pick) { $pick_same++ }
+  } elseif ($a.lm_pick -eq "" -or $b.lm_pick -eq "") {
+    $pick_missing++
+  }
   # mean absolute rank displacement over the candidates present in both lists
   $sum = 0.0; $n = 0
   for ($i = 0; $i -lt $a.final.Count; $i++) {
@@ -98,12 +124,12 @@ foreach ($case in $cases) {
   if ($n -gt 0) { $displacement += $sum / $n }
   if ($a.score_ms -gt 0) { $score_long += $a.score_ms }
   if ($b.score_ms -gt 0) { $score_short += $b.score_ms }
-  $mark = if ($a.final[0] -eq $b.final[0]) { "same" } else { "DIFF" }
-  Write-Host ("  {0,-7} {1,-18} top1 {2,-12} -> {3,-12} [{4}]" -f $case.type, $case.keys, $a.final[0], $b.final[0], $mark)
+  $mark = if ($a.lm_pick -eq $b.lm_pick) { "same" } else { "DIFF" }
+  Write-Host ("  {0,-7} {1,-18} LM pick {2,-12} -> {3,-12} [{4}]" -f $case.type, $case.keys, $a.lm_pick, $b.lm_pick, $mark)
 }
 
 $avgLong = if ($score_long.Count) { ($score_long | Measure-Object -Average).Average } else { 0 }
 $avgShort = if ($score_short.Count) { ($score_short | Measure-Object -Average).Average } else { 0 }
-Write-Host ("score/job: ctx=256 {0:N1}ms  ctx={1} {2:N1}ms" -f $avgLong, $Window, $avgShort)
-Write-Host ("RESULT ctx_window_eval cases={0} top1_same={1} order_same={2} mean_displacement={3:N2} score256={4:N1}ms score{5}={6:N1}ms" -f `
-  $total, $top1_same, $order_same, ($(if ($total) { $displacement / $total } else { 0 })), $avgLong, $Window, $avgShort)
+Write-Host ("score/job: default(ctx adaptive) {0:N1}ms  alt(window {1}) {2:N1}ms" -f $avgLong, $Window, $avgShort)
+Write-Host ("RESULT ctx_window_eval cases={0} lm_pick_same={1}/{2} (missing={3}) top1_same={4} order_same={5} mean_displacement={6:N2} score_default={7:N1}ms score_alt={8:N1}ms" -f `
+  $total, $pick_same, $pick_compared, $pick_missing, $top1_same, $order_same, ($(if ($total) { $displacement / $total } else { 0 })), $avgLong, $avgShort)
