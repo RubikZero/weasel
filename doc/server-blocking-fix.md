@@ -32,7 +32,7 @@
 | 4 | `m_disabled` 可能永久卡住 | 部署若没回报"完成"，`ProcessKeyEvent` 永远返回 FALSE：**锁是空闲的、服务端秒回，但完全不能打字** | 新增 `OnMaintenanceWatchdog`（消息线程，每秒）：disabled 超过 5s 且 `WeaselDeployerMutex` 未被占用 → 自动后台恢复 |
 | 5 | LM 通知洪水 | 每次解码完成 → 一个 PostRime 任务 → 持锁遍历**所有**会话 `refresh_non_confirmed_composition` + 全量 `_UpdateUI` | 通知**合并**（`m_lm_refresh_posted`，最多一个在途）+ 只刷新**正在组字**的会话 |
 | 6 | IPC 卫生问题 | ① 服务端 `_Send` 失败时会走**客户端重连**逻辑 → 连到自己的管道、泄漏实例与工作线程；② `_ConnectServerPipe` 把 `ERROR_PIPE_CONNECTED`（Create 与 Connect 之间的竞态）当错误丢弃**已连上的连接** | ① `_ReconnectOnSendFailure()` 虚函数，服务端不重连、直接断连；② 接受 `ERROR_PIPE_CONNECTED` |
-| 7 | 无法优雅退出 | 消息线程被钉住时 `WM_CLOSE`/托盘退出都无效 | `/q` 改为向服务端窗口 `PostMessage(WM_CLOSE)`（不走管道、不持锁）；无窗口时回退旧路径 |
+| 7 | 无法优雅退出 | 消息线程被钉住时 `WM_CLOSE`/托盘退出都无效 | 逃生通道是**直接**向服务端窗口 `PostMessage(WM_CLOSE)`（不走管道、不持锁）。⚠️ 当时写的"`/q` 改为走 `WM_CLOSE`"并**未真正生效**：`/q` 的解析从来没匹配上（见 `server-quit-scope-fix.md`），本轮已修 |
 
 另外澄清一处上一轮文档的表述：**响应的实际写出上一轮就已经移出锁了**
 （`HandlePipeMessage` 内的 `eat` 只是写线程本地缓冲区，真正的 `_Send` 在锁外的
@@ -106,8 +106,9 @@ Weasel 自己的 `LOG()` 宏在未定义 `WEASEL_ENABLE_LOGGING` 时是**空操�
 1. 看 `%TEMP%\rime.weasel\weasel-watchdog.log`：若有 `api lock held for N ms by '<op>'`，
    `<op>` 直接指出持锁操作（如 `process_key_event`/`start_session`/`initialize`/`apply_ui`）。
 2. 想更灵敏：设 `RIME_WEASEL_LOCK_WARN_MS=200`（仅诊断用）。
-3. 卡住时先尝试 `WeaselServer.exe /q`（现在走 `WM_CLOSE`，不依赖管道）；再不行才结束进程，
-   结束后的下一次按键会由 TSF 自动重新拉起服务。
+3. 卡住时先尝试 `WeaselServer.exe /q`（本轮起**真的**走 `WM_CLOSE` 且只关同目录的服务端，
+   详见 `server-quit-scope-fix.md`；在此之前 `/q` 的解析从未生效）；再不行才结束进程，
+   结束后的下一次按键会由 TSF 自动重新拉起服务（本轮起"服务端进程完全不存在"时会立即拉起）。
 4. 若仍无告警而输入失效，重点转向第四节表格之外的两处：
    `%TEMP%\rime.weasel\*.INFO.*` 是否停住、以及客户端侧 `_lm_refresh_pending` 状态。
 
@@ -123,7 +124,10 @@ Weasel 自己的 `LOG()` 宏在未定义 `WEASEL_ENABLE_LOGGING` 时是**空操�
    ~7.8 倍的真实缺陷：默认 3000ms 预算实际阻塞 23.4 秒）。
 3. 字词重排也给最高概率候选标 `[LM]`（用户待办 1）—— **已完成**，同上文档。
 4. 延迟优化 / 小型 causal Transformer 整句模型（用户待办 3）。
-5. 分析 09-17 14:44:36/40 的两个 `WeaselServer.exe` 转储。
+5. ~~分析 09-17 14:44:36/40 的两个 `WeaselServer.exe` 转储~~ —— **已完成**：
+   两次都是 `0xC0000005`、**同一地址 `rime.dll+0x439E4`**（确定性缺陷）；
+   但崩溃时那份 `rime.dll` 的 PDB 已被后续构建覆盖，函数级定位需要再现时保留
+   dmp + 当时的 dll，详见 `server-quit-scope-fix.md` 第五节。
 
 ## 七、本轮改动文件
 | 文件 | 改动 |
@@ -133,7 +137,7 @@ Weasel 自己的 `LOG()` 宏在未定义 `WEASEL_ENABLE_LOGGING` 时是**空操�
 | `weasel/include/WeaselIPC.h` | `RequestHandler::OnMaintenanceWatchdog()` |
 | `weasel/include/RimeWithWeasel.h`、`weasel/RimeWithWeasel/RimeWithWeasel.cpp` | UI 投递回消息线程、`Initialize/Finalize/UpdateColorTheme` 加有界锁、异步维护恢复、`m_disabled` 原子化、LM 通知合并与只刷新组字会话、`add_session` 由全局改为参数 |
 | `weasel/WeaselServer/WeaselServerApp.cpp` | 注册 UI 投递器 |
-| `weasel/WeaselServer/WeaselServer.cpp` | `/q` 走 `WM_CLOSE` 逃生通道 |
+| `weasel/WeaselServer/WeaselServer.cpp` | 逃生通道：向服务端窗口 `PostMessage(WM_CLOSE)`（`/q` 的解析在本轮才修好，见 `server-quit-scope-fix.md`） |
 | `weasel/include/PipeChannel.h`、`weasel/WeaselIPC/PipeChannel.cpp` | 服务端不重连、接受 `ERROR_PIPE_CONNECTED` |
 | `weasel/tools/ipc_stall_test.ps1`、`ipc_maintenance_test.ps1`、`ipc_stress_test.ps1`、`apilock_selftest.{cc,cmd}`（新增） | 隔离回归测试 |
 | `third-party/lm-test/weasel_ipc_maintenance_e2e.cc`、`build_weasel_ipc_maintenance_e2e.cmd`（新增） | 维护往返端到端客户端 |

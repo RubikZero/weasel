@@ -235,8 +235,13 @@ class WeaselTSF : public ITfTextInputProcessorEx,
   static const int kStalledTransactionLimit = 3;
   // Minimum time between connection attempts while the server is unreachable.
   static const ULONGLONG kServerRetryCooldownMs = 1000;
+  // Minimum time between attempts to start a server process that is gone
+  // entirely (crashed, or stopped from outside), so that typing cannot spawn a
+  // storm of service launches.
+  static const ULONGLONG kServerRelaunchIntervalMs = 5000;
   int _ipc_failure_streak = 0;
   ULONGLONG _server_retry_cooldown_until = 0;
+  ULONGLONG _server_relaunch_not_before = 0;
   // Drop the local composition/session without talking to the server; the
   // equivalent of switching the input method away and back.
   void _RecoverStalledSession();

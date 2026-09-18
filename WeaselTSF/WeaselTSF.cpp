@@ -19,6 +19,25 @@ static void error_message(const WCHAR* msg) {
   }
 }
 
+// Number of WeaselServer.exe processes, from any installation or build.  Zero
+// is unambiguous: no server can answer the pipe, so one has to be started.
+static int count_server_processes() {
+  int count = 0;
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE)
+    return 0;
+  PROCESSENTRY32 pe;
+  pe.dwSize = sizeof(pe);
+  if (Process32First(snap, &pe)) {
+    do {
+      if (_wcsicmp(pe.szExeFile, L"WeaselServer.exe") == 0)
+        count++;
+    } while (Process32Next(snap, &pe));
+  }
+  CloseHandle(snap);
+  return count;
+}
+
 WeaselTSF::WeaselTSF() {
   _cRef = 1;
 
@@ -271,26 +290,18 @@ bool WeaselTSF::_EnsureServerConnected() {
   if (!m_client.Echo()) {
     _Reconnect();
     retry++;
-    if (retry >= 6) {
+    const bool no_server_process = (count_server_processes() == 0);
+    // Either the retry budget is used up, or no server process exists at all --
+    // the service crashed, or was stopped from outside.  The latter cannot be
+    // waited out, and leaving it alone is what forces the user to restart the
+    // service by hand, so start it here; the two conditions share one throttle
+    // so a keystroke burst cannot spawn a storm of service launches.
+    if (retry >= 6 ||
+        (no_server_process && now >= _server_relaunch_not_before)) {
+      _server_relaunch_not_before = now + kServerRelaunchIntervalMs;
       HANDLE hMutex = CreateMutex(NULL, TRUE, L"WeaselDeployerExclusiveMutex");
-      const auto count_server_process = []() -> int {
-        int count = 0;
-        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (snap == INVALID_HANDLE_VALUE)
-          return 0;
-        PROCESSENTRY32 pe;
-        pe.dwSize = sizeof(pe);
-        if (Process32First(snap, &pe)) {
-          do {
-            if (_wcsicmp(pe.szExeFile, L"WeaselServer.exe") == 0)
-              count++;
-          } while (Process32Next(snap, &pe));
-        }
-        CloseHandle(snap);
-        return count;
-      };
       if (!m_client.Echo() && GetLastError() != ERROR_ALREADY_EXISTS &&
-          !count_server_process()) {
+          no_server_process) {
         std::wstring dir = _GetRootDir();
         std::thread th([dir, this]() {
           ShellExecuteW(NULL, L"open", (dir + L"\\start_service.bat").c_str(),
