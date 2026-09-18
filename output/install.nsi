@@ -162,6 +162,12 @@ uninst:
 
 call_uninstaller:
   ExecWait '"$R1\WeaselServer.exe" /quit'
+  ; The /quit above runs the *previously installed* build.  In builds before
+  ; 2b7948e the option never matched (lpstrCmdLine keeps the space that
+  ; separates it from the program name), so that call could shut down the
+  ; running server and then start one of its own from this directory.  Make
+  ; sure nothing is left holding the files we are about to delete or replace.
+  ExecWait '"$SYSDIR\taskkill.exe" /F /IM WeaselServer.exe'
   ExecWait '"$R1\WeaselSetup.exe" /u'
   ; Remove registry keys
   DeleteRegKey HKLM SOFTWARE\Rime
@@ -215,6 +221,10 @@ Section "Weasel"
 
   IfFileExists "$INSTDIR\WeaselServer.exe" 0 +2
   ExecWait '"$INSTDIR\WeaselServer.exe" /quit'
+  ; Same guard as above: the build being upgraded may leave a server behind
+  ; when it is asked to quit, and it would then be running from files that are
+  ; replaced in this section.
+  ExecWait '"$SYSDIR\taskkill.exe" /F /IM WeaselServer.exe'
 
   SetOverwrite try
   ; Set output path to the installation directory.
@@ -408,6 +418,9 @@ FunctionEnd
 Section "Uninstall"
 
   ExecWait '"$INSTDIR\WeaselServer.exe" /quit'
+  ; See the note in the upgrade path: a build older than 2b7948e can leave a
+  ; server running after this call, and it would keep the files we delete here.
+  ExecWait '"$SYSDIR\taskkill.exe" /F /IM WeaselServer.exe'
 
   ExecWait '"$INSTDIR\WeaselSetup.exe" /u'
 
