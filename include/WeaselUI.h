@@ -51,6 +51,10 @@ class UI {
   bool IsShown() const;
   bool StartLmRefreshTimer(UINT initial_ms, UINT interval_ms, UINT attempts);
   void StopLmRefreshTimer();
+  // Whether the candidate window still owns a live LM refresh timer.  The timer
+  // dies with the window, so callers must consult this rather than a cached
+  // "refresh pending" flag.
+  bool IsLmRefreshTimerRunning() const;
 
   // 重绘界面
   void Refresh();

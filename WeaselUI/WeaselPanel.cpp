@@ -984,6 +984,32 @@ bool WeaselPanel::_DrawCandidates(CDCHandle& dc, bool back) {
   return drawn;
 }
 
+// UpdateLayeredWindow() expects a 32-bpp premultiplied-alpha source.  A plain
+// CreateCompatibleBitmap() DDB leaves that alpha channel undefined, so every
+// pixel the paint pass does not cover -- the border/shadow band around the
+// background rect, or the whole bitmap when there is nothing to draw -- may
+// become opaque black on screen (a black block next to the caret).  Use a DIB
+// section we can zero out, so untouched pixels are truly transparent.
+static HBITMAP CreateTransparentBitmap(HDC hdc, int width, int height) {
+  if (width <= 0 || height <= 0)
+    return NULL;
+  BITMAPINFO info = {};
+  info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  info.bmiHeader.biWidth = width;
+  info.bmiHeader.biHeight = -height;  // top-down, like the layered surface
+  info.bmiHeader.biPlanes = 1;
+  info.bmiHeader.biBitCount = 32;
+  info.bmiHeader.biCompression = BI_RGB;
+  void* bits = nullptr;
+  HBITMAP bitmap =
+      ::CreateDIBSection(hdc, &info, DIB_RGB_COLORS, &bits, NULL, 0);
+  if (!bitmap)
+    return NULL;
+  if (bits)
+    memset(bits, 0, static_cast<size_t>(width) * height * 4);
+  return bitmap;
+}
+
 // draw client area
 void WeaselPanel::DoPaint(CDCHandle dc) {
   // turn off WS_EX_TRANSPARENT, for better resp performance
@@ -992,9 +1018,17 @@ void WeaselPanel::DoPaint(CDCHandle dc) {
   // prepare memDC
   CDCHandle hdc = ::GetDC(m_hWnd);
   CDCHandle memDC = ::CreateCompatibleDC(hdc);
-  HBITMAP memBitmap = ::CreateCompatibleBitmap(hdc, rcw.Width(), rcw.Height());
-  ::SelectObject(memDC, memBitmap);
+  HBITMAP memBitmap = CreateTransparentBitmap(hdc, rcw.Width(), rcw.Height());
   ReleaseDC(hdc);
+  if (!memBitmap || !memDC) {
+    // Nothing we can paint with: leave the previous layered content alone
+    // instead of pushing an undefined surface to the screen.
+    if (memBitmap)
+      ::DeleteObject(memBitmap);
+    ::DeleteDC(memDC);
+    return;
+  }
+  ::SelectObject(memDC, memBitmap);
   bool drawn = false;
   if (!hide_candidates) {
     CRect auxrc = m_layout->GetAuxiliaryRect();
@@ -1110,6 +1144,10 @@ void WeaselPanel::DoPaint(CDCHandle dc) {
     if (!drawn)
       ShowWindow(SW_HIDE);
   }
+  // Remember whether this pass left anything visible; the (now fully
+  // transparent) layered surface must not be shown when there is nothing to
+  // paint, and a later Show() call would otherwise surface stale content.
+  m_paintDrew = drawn;
   _LayerUpdate(rcw, memDC);
 
   // clean objs
@@ -1131,6 +1169,12 @@ bool WeaselPanel::StartLmRefreshTimer(UINT initial_ms,
   if (!IsWindow() || !attempts)
     return false;
   StopLmRefreshTimer();
+  // A zero delay would make WM_TIMER fire back-to-back and spin the UI thread,
+  // so clamp both the first and the follow-up delays.
+  if (initial_ms < 20)
+    initial_ms = 20;
+  if (interval_ms < 30)
+    interval_ms = 30;
   lm_refresh_interval_ms_ = interval_ms;
   lm_refresh_attempts_ = attempts;
   return ::SetTimer(m_hWnd, LM_REFRESH_TIMER, initial_ms, nullptr) != 0;

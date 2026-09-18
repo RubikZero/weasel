@@ -27,6 +27,9 @@ class weasel::UIImpl {
     return panel.StartLmRefreshTimer(initial_ms, interval_ms, attempts);
   }
   void StopLmRefreshTimer() { panel.StopLmRefreshTimer(); }
+  bool IsLmRefreshTimerRunning() const {
+    return panel.IsLmRefreshTimerRunning();
+  }
   bool IsShown() const { return shown; }
 
   static VOID CALLBACK OnTimer(_In_ HWND hwnd,
@@ -43,8 +46,21 @@ UINT_PTR UIImpl::timer = 0;
 void UIImpl::Show() {
   if (!panel.IsWindow())
     return;
-  panel.ShowWindow(SW_SHOWNA);
-  shown = true;
+  if (panel.HasContent()) {
+    // While composing, the LM refresh path re-applies an unchanged context
+    // every interval_ms.  The panel is normally already visible then, and
+    // re-showing it accomplishes nothing while risking a stale layered
+    // surface (the source of the black-block artifact), so keep it idempotent.
+    if (!panel.IsWindowVisible())
+      panel.ShowWindow(SW_SHOWNA);
+    shown = true;
+  } else {
+    // Nothing was painted: keep the fully transparent window hidden instead of
+    // letting it cover the caret area.
+    if (panel.IsWindowVisible())
+      panel.ShowWindow(SW_HIDE);
+    shown = false;
+  }
   if (timer) {
     KillTimer(panel.m_hWnd, AUTOHIDE_TIMER);
     timer = 0;
@@ -161,6 +177,10 @@ bool UI::StartLmRefreshTimer(UINT initial_ms, UINT interval_ms, UINT attempts) {
 void UI::StopLmRefreshTimer() {
   if (pimpl_)
     pimpl_->StopLmRefreshTimer();
+}
+
+bool UI::IsLmRefreshTimerRunning() const {
+  return pimpl_ && pimpl_->IsLmRefreshTimerRunning();
 }
 
 void UI::Refresh() {

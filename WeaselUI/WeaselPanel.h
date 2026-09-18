@@ -72,6 +72,15 @@ class WeaselPanel
   void RedrawWindow();
   bool StartLmRefreshTimer(UINT initial_ms, UINT interval_ms, UINT attempts);
   void StopLmRefreshTimer();
+  // True when the last paint pass produced something visible.  The LM refresh
+  // loop re-applies an unchanged context while composing, so callers use this
+  // to avoid re-showing a panel that has nothing (or nothing new) to show.
+  bool HasContent() const { return m_paintDrew; }
+  // The refresh timer lives on this window and dies with it; the owner must ask
+  // here instead of trusting its own cached "pending" flag.
+  bool IsLmRefreshTimerRunning() const {
+    return IsWindow() && lm_refresh_attempts_ != 0;
+  }
 
   static VOID CALLBACK OnTimer(_In_ HWND hwnd,
                                _In_ UINT uMsg,
@@ -158,5 +167,6 @@ class WeaselPanel
   HMONITOR m_hMonitor = NULL;
   UINT lm_refresh_interval_ms_ = 0;
   UINT lm_refresh_attempts_ = 0;
+  bool m_paintDrew = false;
   bool m_redraw_by_monitor_change = false;
 };

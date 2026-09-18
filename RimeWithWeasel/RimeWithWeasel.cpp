@@ -1,4 +1,4 @@
-﻿#include "stdafx.h"
+#include "stdafx.h"
 #include <logging.h>
 #include <RimeWithWeasel.h>
 #include <StringAlgorithm.hpp>
@@ -550,6 +550,16 @@ void RimeWithWeaselHandler::OnNotify(void* context_object,
     }
     return;
   }
+  // Only deploy / schema / option carry something for the user to see.  The
+  // engine also reports plain property changes -- notably "surrounding_text",
+  // which the cursor-context IPC sets before every keystroke.  Storing those
+  // made _ShowMessage pop an empty tip window at the caret for
+  // show_notifications_time on every key, and could also clobber a pending
+  // notification from the same key.
+  if (strcmp(message_type, "deploy") != 0 &&
+      strcmp(message_type, "schema") != 0 &&
+      strcmp(message_type, "option") != 0)
+    return;
   std::lock_guard<std::mutex> lock(m_notifier_mutex);
   m_message_type = message_type;
   m_message_value = message_value;
@@ -881,6 +891,10 @@ bool RimeWithWeaselHandler::_ShowMessage(Context& ctx, Status& status) {
     if (m_message_value == "full_shape" || m_message_value == "!full_shape")
       status.type = FULL_SHAPE;
   }
+  // Nothing to tell the user: neither text nor the status icon.  Popping the
+  // tip window here would only put an empty panel next to the caret.
+  if (!show_icon && tips.empty())
+    return m_ui->IsCountingDown();
   auto counter = m_ui->IsCountingDown();
   if (!show_icon && counter)
     return counter;

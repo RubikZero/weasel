@@ -16,7 +16,11 @@ void WeaselTSF::_ScheduleLmRefresh() {
   const UINT timeout_ms = _lm_refresh_timeout_ms;
   const UINT attempts =
       1 + static_cast<unsigned int>((timeout_ms - initial_ms) / interval_ms);
-  if (_lm_refresh_pending)
+  // The timer belongs to the candidate window and is destroyed together with it
+  // (commit, click-select, UI element end).  A cached "pending" flag would then
+  // suppress every later schedule for the rest of the pause, so ask the window
+  // itself whether the refresh is really still armed.
+  if (_lm_refresh_pending && _cand->IsLmRefreshTimerRunning())
     return;
   _lm_refresh_pending =
       _cand->StartLmRefreshTimer(initial_ms, interval_ms, attempts);

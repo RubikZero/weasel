@@ -343,6 +343,10 @@ void CCandidateList::StopLmRefreshTimer() {
     _ui->StopLmRefreshTimer();
 }
 
+bool CCandidateList::IsLmRefreshTimerRunning() {
+  return _ui && _ui->IsLmRefreshTimerRunning();
+}
+
 com_ptr<ITfContext> CCandidateList::GetContextDocument() {
   return _pContextDocument;
 }
